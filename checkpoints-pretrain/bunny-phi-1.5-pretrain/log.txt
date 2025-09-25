@@ -1,0 +1,33 @@
+[2025-09-25 16:34:30,127] [WARNING] [runner.py:232:fetch_hostfile] Unable to find hostfile, will proceed with training with local resources only.
+the data path is ........................................hhhhhhhhhhhhh ./data/pretrain/filtered_data_compact.json
+the data path is ........................................hhhhhhhhhhhhh ./data/pretrain/filtered_data_compact.json
+Formatting inputs...Skip in lazy mode
+Formatting inputs...Skip in lazy mode
+{'loss': 6.8758, 'grad_norm': 8.77168083190918, 'learning_rate': 0.0, 'epoch': 0.0}
+{'loss': 7.1772, 'grad_norm': 9.173699378967285, 'learning_rate': 5.33049040511727e-07, 'epoch': 0.0}
+{'loss': 6.635, 'grad_norm': 9.508750915527344, 'learning_rate': 1.066098081023454e-06, 'epoch': 0.0}
+{'loss': 6.9231, 'grad_norm': 4.857560157775879, 'learning_rate': 1.5991471215351813e-06, 'epoch': 0.0}
+{'loss': 7.2655, 'grad_norm': 11.103387832641602, 'learning_rate': 2.132196162046908e-06, 'epoch': 0.0}
+{'loss': 7.1253, 'grad_norm': 4.031185626983643, 'learning_rate': 2.6652452025586354e-06, 'epoch': 0.0}
+{'loss': 7.3177, 'grad_norm': 14.806337356567383, 'learning_rate': 3.1982942430703625e-06, 'epoch': 0.0}
+{'loss': 6.9477, 'grad_norm': 3.4867305755615234, 'learning_rate': 3.7313432835820897e-06, 'epoch': 0.0}
+{'loss': 6.9094, 'grad_norm': 8.998659133911133, 'learning_rate': 4.264392324093816e-06, 'epoch': 0.0}
+{'loss': 7.3068, 'grad_norm': 4.184439659118652, 'learning_rate': 4.797441364605544e-06, 'epoch': 0.0}
+{'loss': 7.07, 'grad_norm': 5.210719108581543, 'learning_rate': 5.330490405117271e-06, 'epoch': 0.0}
+{'loss': 7.3811, 'grad_norm': 7.360267639160156, 'learning_rate': 5.863539445628999e-06, 'epoch': 0.0}
+{'loss': 7.1982, 'grad_norm': 5.64469051361084, 'learning_rate': 6.396588486140725e-06, 'epoch': 0.0}
+{'loss': 6.7932, 'grad_norm': 7.6699604988098145, 'learning_rate': 6.929637526652452e-06, 'epoch': 0.0}
+{'loss': 7.266, 'grad_norm': 3.9415061473846436, 'learning_rate': 7.462686567164179e-06, 'epoch': 0.0}
+{'loss': 7.1122, 'grad_norm': 5.230275630950928, 'learning_rate': 7.995735607675907e-06, 'epoch': 0.0}
+{'loss': 7.1299, 'grad_norm': 3.5226023197174072, 'learning_rate': 8.528784648187633e-06, 'epoch': 0.0}
+{'loss': 6.7495, 'grad_norm': 3.189436435699463, 'learning_rate': 9.061833688699359e-06, 'epoch': 0.0}
+{'loss': 6.8293, 'grad_norm': 2.717310905456543, 'learning_rate': 9.594882729211089e-06, 'epoch': 0.0}
+{'loss': 6.3775, 'grad_norm': 4.442948818206787, 'learning_rate': 1.0127931769722815e-05, 'epoch': 0.0}
+{'loss': 6.8604, 'grad_norm': 3.5941684246063232, 'learning_rate': 1.0660980810234541e-05, 'epoch': 0.0}
+{'loss': 6.6736, 'grad_norm': 3.5316531658172607, 'learning_rate': 1.1194029850746268e-05, 'epoch': 0.0}
+{'loss': 6.8195, 'grad_norm': 2.963773488998413, 'learning_rate': 1.1727078891257997e-05, 'epoch': 0.0}
+{'loss': 6.2452, 'grad_norm': 2.6696274280548096, 'learning_rate': 1.2260127931769724e-05, 'epoch': 0.0}
+{'loss': 6.7564, 'grad_norm': 2.6025984287261963, 'learning_rate': 1.279317697228145e-05, 'epoch': 0.0}
+{'loss': 6.873, 'grad_norm': 3.3020079135894775, 'learning_rate': 1.3326226012793176e-05, 'epoch': 0.0}
+{'loss': 6.403, 'grad_norm': 3.750941514968872, 'learning_rate': 1.3859275053304904e-05, 'epoch': 0.0}
+{'loss': 6.3758, 'grad_norm': 3.0794036388397217, 'learning_rate': 1.4392324093816632e-05, 'epoch': 0.0}
