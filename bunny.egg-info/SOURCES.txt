@@ -44,7 +44,11 @@ bunny/model/language_model/qwen2/tokenization_qwen2.py
 bunny/model/language_model/qwen2/tokenization_qwen2_fast.py
 bunny/model/language_model/stable_lm/configuration_stablelm_epoch.py
 bunny/model/language_model/stable_lm/modeling_stablelm_epoch.py
+bunny/model/multimodal_encoder/MultiBackboneChannelConcatenationVisionTower.py
+bunny/model/multimodal_encoder/base_encoder.py
 bunny/model/multimodal_encoder/builder.py
+bunny/model/multimodal_encoder/clip_encoder_dfn.py
+bunny/model/multimodal_encoder/dfn_clip_encoder.py
 bunny/model/multimodal_encoder/clip/clip_encoder.py
 bunny/model/multimodal_encoder/eva_clip/eva_clip_encoder.py
 bunny/model/multimodal_encoder/eva_clip/eva_clip_processors.py

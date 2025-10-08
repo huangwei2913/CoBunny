@@ -80,6 +80,93 @@ def preprocess_multimodal(
 # 这段代码通过对“多轮对话”以及“文本加图片”的多模态输入，利用特定分隔符拆分成“提问”和“回答”，
 # 利用tokenizer计算每部分token数量，进而对标签进行屏蔽（mask），
 # 让模型只训练正确生成回答部分，提问部分不参与loss计算，保证训练有效且高效。
+
+#{"id": "0010278167", "image": "0010278167.jpg", "conversations":
+#  [{"from": "human", "value": "<image>\nWhat is this?"}, 
+# {"from": "gpt", "value": "Piece of dark jeans fabric Royalty Free Stock Photography"}]}
+
+
+# 在preprocess_bunny中图像的处理逻辑（结合上下文和一般多模态流程推断）：
+# 1. 处理对话消息
+# 函数遍历 sources（多条对话，每条对话是多轮消息列表）。
+
+# 每个消息有 from (human 或 gpt) 和 value 字段，value 可能包含文本，也可能包含类似 <image>\nxxx 的图像标记。
+
+# 2. 对图像标签的处理
+# 当文本中含 <image> 标记时，说明这一条消息含有对应图像信息。
+
+# 代码不会直接返回图像二进制，而是会保存这条消息并在后续结合视觉编码器处理：
+
+# 在构建对话prompt时保留 <image> 标记占位，为后续视觉特征编码准备。
+
+# 3. 融合视觉信息（在其他代码片段中体现，encode_images等）
+# 函数或后续流程会调用视觉编码器（vision tower）对实际图像进行编码，得到视觉特征向量。
+
+# 这些视觉向量替换对话中 <image> 对应的位置token，实现文本和图像特征的融合。
+
+# 4. tokenizer处理
+# 保留 <image> 的文本被输入tokenizer，tokenizer识别特殊token（或用特殊token替代），配合视觉向量一起作为模型输入。
+
+# 5. 返回的结构
+# 返回的 input_ids 中含文本token及视觉token的id或embedding
+
+# labels 对应文本预测目标，图像部分一般用忽略值标注，避免计算loss。
+
+# 示例伪代码的理解：
+# python
+# for source in sources:
+#     # 取出对话里的消息列表
+#     conv.messages = []
+#     for sentence in source:
+#         role = roles[sentence["from"]]
+#         conv.append_message(role, sentence["value"])  # value可能包含"<image>"
+#     conversations.append(conv.get_prompt())  # prompt中有"<image>"标识
+
+# # conversations 是多条含"<image>"占位的对话文本列表
+
+# # 后续调用tokenizer和视觉编码器时，<image>会被用视觉特征向量替代
+# # 组成模型最终输入，如 input_ids、labels
+# 总结
+# 函数 preprocess_bunny 批量读取对话数据，包含文本和图像占位符 <image>。
+
+# 对话中的图像不会直接作为文本传入，而是由视觉编码器生成特征嵌入后结合进输入。
+
+# 生成的 input_ids 序列包括文本token和视觉token，labels中对应图像位置忽略loss。
+
+# 这样实现了文本和图像的联合输入，支持多模态训练。
+
+# 理解这种设计需要结合视觉编码器和tokenizer共同参与，preprocess_bunny 负责对话文本和图像占位符的归整与格式化，是多模态输入构造流水线的起点。preprocess_bunny 函数中对含有图像的多模态对话处理，核心是保留对话文本中的 <image> 标记作为视觉信息的占位符，形成文本序列（conversations），在后续流程中通过视觉编码器把对应的图像编码成特征向量，替换 <image> 位置的token，和文本token一起组成模型的输入。
+
+# 具体来说：
+
+# 遍历每条对话消息，得到带 <image> 的文本。
+
+# 以 <image> 作为视觉token占位符保留在对话prompt中，方便tokenizer编码。
+
+# 后续调用视觉编码器，将真实图像转换成视觉embedding向量。
+
+# 在模型输入序列中，文本token和视觉特征融合，形成多模态输入序列。
+
+# input_ids 包含文本token id，视觉token位置一般用特殊id占位。
+
+# labels 中对图像对应位置使用忽略索引，避免计算损失。
+
+# 这样 preprocess_bunny 实际构建的是一个格式化的文本与图像占位结合的多模态输入模板，真实的图像特征编码和融合由视觉模块后续处理完成，实现多模态对话的联合训练和推理。通过保留 <image> 标记，文本和图像能有效配合，形成统一的模型输入。
+
+# 总结：preprocess_bunny 是多模态对话的前期文本整合与格式化步骤，图像作为特殊标记引入，真正的视觉向量在后续编码阶段产生并融合，最终形成模型训练/推理所需的多模态输入序列。
+
+
+
+
+
+
+
+
+
+
+
+
+
 def preprocess_bunny(
         sources,
         tokenizer: transformers.PreTrainedTokenizer,
@@ -87,7 +174,7 @@ def preprocess_bunny(
 ) -> Dict:
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
-
+    #roles = {"human": USER, "gpt": ASSISTANT}
     # Apply prompt templates
     conversations = []
     for i, source in enumerate(sources):
@@ -339,7 +426,7 @@ class LazySupervisedDataset(Dataset):
                  tokenizer: transformers.PreTrainedTokenizer,
                  data_args: DataArguments):
         super(LazySupervisedDataset, self).__init__()
-        print("the data path is ........................................hhhhhhhhhhhhh",data_path)
+        print("the data path is ........................................",data_path)
         list_data_dict = json.load(open(data_path, "r"))
 
         print("Formatting inputs...Skip in lazy mode")
@@ -401,9 +488,9 @@ class LazySupervisedDataset(Dataset):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
         if 'image' in sources[0]:
-            image_file = self.list_data_dict[i]['image']
-            image_folder = self.data_args.image_folder
-            processor = self.data_args.image_processor
+            image_file = self.list_data_dict[i]['image'] #得到影像名称
+            image_folder = self.data_args.image_folder  #得到影像存储位置
+            processor = self.data_args.image_processor  #得到影像处理器
             image = Image.open(os.path.join(image_folder, image_file)).convert('RGB')
             if self.data_args.image_aspect_ratio == 'pad':
                 def expand2square(pil_img, background_color):
@@ -422,7 +509,7 @@ class LazySupervisedDataset(Dataset):
                 image = expand2square(image, tuple(int(x * 255) for x in processor.image_mean))
                 image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
             else:
-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]  # pt 是pytorch张量的简写？？直接返回pixel_values代表，一批涨了，然后取第一个
+                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]  # pt 是pytorch张量的简写？？直接返回pixel_values代表，一批张量，然后取第一个
             sources = preprocess_multimodal(
                 copy.deepcopy([e["conversations"] for e in sources]), self.data_args) # 完全复制一份
         else:

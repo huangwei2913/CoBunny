@@ -964,15 +964,15 @@ class PhiForCausalLM(PhiPreTrainedModel):
     # Copied from transformers.models.llama.modeling_llama.LlamaForCausalLM.__init__ with Llama->Phi,bias=False->bias=True
     def __init__(self, config):
         super().__init__(config)
-        self.model = PhiModel(config)
+        self.model = PhiModel(config) #内部封装了一个 PhiModel（Transformer解码器核心），实现对输入序列的编码处理；
         self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=True)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=True) #头部有一个线性层 lm_head，把隐藏状态映射到词表大小，用于预测下一个token的概率。
 
         # Initialize weights and apply final processing
-        self.post_init()
+        self.post_init() # 构造函数调用 post_init() 完成权重初始化和最终处理。
 
     # Copied from transformers.models.llama.modeling_llama.LlamaForCausalLM.get_input_embeddings
-    def get_input_embeddings(self):
+    def get_input_embeddings(self):  #操作内部的token嵌入层
         return self.model.embed_tokens
 
     # Copied from transformers.models.llama.modeling_llama.LlamaForCausalLM.set_input_embeddings
@@ -980,7 +980,7 @@ class PhiForCausalLM(PhiPreTrainedModel):
         self.model.embed_tokens = value
 
     # Copied from transformers.models.llama.modeling_llama.LlamaForCausalLM.get_output_embeddings
-    def get_output_embeddings(self):
+    def get_output_embeddings(self):  #操作语言模型head的权重
         return self.lm_head
 
     # Copied from transformers.models.llama.modeling_llama.LlamaForCausalLM.set_output_embeddings
@@ -988,7 +988,7 @@ class PhiForCausalLM(PhiPreTrainedModel):
         self.lm_head = new_embeddings
 
     # Copied from transformers.models.llama.modeling_llama.LlamaForCausalLM.set_decoder
-    def set_decoder(self, decoder):
+    def set_decoder(self, decoder): 
         self.model = decoder
 
     # Copied from transformers.models.llama.modeling_llama.LlamaForCausalLM.get_decoder

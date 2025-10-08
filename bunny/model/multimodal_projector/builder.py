@@ -148,12 +148,14 @@ class SPP(nn.Module):
             x = self.linear_2(x)
         return x
 
-
+#也就说我们可以在这里强制让视觉编码器，直接输出IdentityMap，特征向量
 def build_vision_projector(config, delay_load=False, **kwargs):
     projector_type = getattr(config, 'mm_projector_type', 'mlp2x_gelu')
 
     if projector_type == 'linear':
         return nn.Linear(config.mm_hidden_size, config.hidden_size)
+     #这个里面的mm_hidden_size参数对应的是视觉编码器输出的嵌入的特征维度， 
+     # 这里的hidden_size对应的是LLM Decoder期望的特征维度。每个token的特征维度都是一样的，例如llmaconfig是4096
 
     elif projector_type.startswith('mlp'):
         mlp_gelu_match = re.match(r'^mlp(\d+)x_gelu$', projector_type)

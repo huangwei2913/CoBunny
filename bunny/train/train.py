@@ -29,11 +29,12 @@ class ModelArguments:
     version: Optional[str] = field(default=None)
     freeze_backbone: bool = field(default=False)
     tune_mm_mlp_adapter: bool = field(default=False)
+    unfreeze_mm_vision_tower: bool = field(default=False)  
     vision_tower: Optional[str] = field(default=None)
     unfreeze_vision_tower: bool = field(default=False)
     use_s2: bool = field(default=False)
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)
-    mm_projector_type: Optional[str] = field(default='mlp2x_gelu')
+    mm_projector_type: Optional[str] = field(default='mlp2x_gelu')  #这个参数非常重要，它会指导如何建立投影层网络结构
 
 
 
@@ -79,6 +80,7 @@ class TrainingArguments(transformers.TrainingArguments):
     optim: str = field(default="adamw_torch")
     remove_unused_columns: bool = field(default=False)
     freeze_mm_mlp_adapter: bool = field(default=False)
+    save_mm_vision_tower: bool = field(default=False) #增加一个是否保留视觉塔模型部分的参数
     mpt_attn_impl: Optional[str] = field(default="triton")
     model_max_length: int = field(
         default=512,
@@ -107,6 +109,15 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_bias: str = "none"
     mm_projector_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
+
+# 你自定义的TrainingArguments是继承自transformers.TrainingArguments的。这意味着它会继承父类里所有的字段和功能。
+
+# 你自定义的新字段只是为了补充或覆盖部分配置，没有完全重写所有参数。
+
+# 所以即使你的类代码中看不到save_strategy和save_steps，它们依旧存在于父类里，参数解析时会自动识别并使用。
+
+# 这是一种常见的设计：自定义只添加需要修改或新增的配置，核心训练参数由父类TrainingArguments保障。
+
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -178,10 +189,29 @@ def find_all_linear_names(model):
         lora_module_names.remove('lm_head')
     return list(lora_module_names)
 
+def checkpoint_has_trainer_state(checkpoint_dir):
+    return os.path.exists(os.path.join(checkpoint_dir, "trainer_state.json"))
+
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
                                    output_dir: str):
     """Collects the state dict and dump to disk."""
+    if getattr(trainer.args, "save_mm_vision_tower", False):
+        keys_to_match = ['vision_tower']
+        weight_to_save = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
+        trainer.model.config.save_pretrained(output_dir)
+        # 保存路径逻辑
+        current_folder = output_dir.split('/')[-1]
+        parent_folder = os.path.dirname(output_dir)
+        if trainer.args.local_rank == 0 or trainer.args.local_rank == -1:
+            if current_folder.startswith('checkpoint-'):
+                vision_folder = os.path.join(parent_folder, "vision_tower")
+                os.makedirs(vision_folder, exist_ok=True)
+                torch.save(weight_to_save, os.path.join(vision_folder, f'{current_folder}.bin'))
+            else:
+                torch.save(weight_to_save, os.path.join(output_dir, f'vision_tower.bin'))
+        # 这里是否return取决于你是否只保存视觉塔，通常可以继续执行下面的流程               
+
 
     if getattr(trainer.args, "tune_mm_mlp_adapter", False):
         # Only save Adapter
@@ -328,7 +358,7 @@ def train():
 
     model.config.use_cache = False
 
-    if model_args.freeze_backbone:
+    if model_args.freeze_backbone:   #是否冻结骨干
         model.model.requires_grad_(False)
 
     if training_args.bits in [4, 8]:
@@ -489,11 +519,25 @@ def train():
                            tokenizer=tokenizer,
                            args=training_args,
                            **data_module)
-
-    if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
-        trainer.train(resume_from_checkpoint=True)
+    
+    checkpoints = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
+    if checkpoints:
+        # 选最近的checkpoint
+        latest_ckpt = str(sorted(checkpoints)[-1])
+        if checkpoint_has_trainer_state(latest_ckpt):
+            print(f"Resuming from checkpoint: {latest_ckpt}")
+            trainer.train(resume_from_checkpoint=latest_ckpt)
+        else:
+            print(f"Checkpoint {latest_ckpt} missing trainer_state.json, training from scratch.")
+            trainer.train()
     else:
-        trainer.train()
+        print("No checkpoint found, training from scratch.")
+        trainer.train()   
+
+    # if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
+    #     trainer.train(resume_from_checkpoint=True)
+    # else:
+    #     trainer.train()
     trainer.save_state()
 
     model.config.use_cache = True

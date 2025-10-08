@@ -1403,6 +1403,8 @@ class LlamaModel(LlamaPreTrainedModel):
         return causal_mask
 
 
+#，_tied_weights_keys的定义是为了确保输入嵌入和输出lm_head权重共享，起到减少参数、提升效果的作用，属于模型权重绑定机制的一部分，即使代码里没有直接使用，也必须定义。[general knowledge]
+
 class LlamaForCausalLM(LlamaPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 

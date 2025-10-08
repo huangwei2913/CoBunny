@@ -5,6 +5,29 @@ from transformers import SiglipVisionModel, SiglipImageProcessor, SiglipVisionCo
 from bunny.util.s2wrapper import forward as multiscale_forward
 
 
+# SiglipVisionTower 模块的功能和之前我们讨论的 CLIPVisionTower 基本类似，都是封装了一个预训练的视觉Transformer模型来做视觉特征提取。核心功能是：
+
+# 从路径或名称加载预训练的SigLip视觉模型和对应的图片预处理器。
+
+# 冻结模型参数，不参与训练，只进行推理。
+
+# 通过指定的层(select_layer)和特征类型（patch或包含CLS token的cls_patch）选取需要的隐藏特征。
+
+# 支持输入单张图像或图像列表，输出对应的视觉特征。
+
+# 附带一些属性方便获得隐藏向量维度、设备、数据类型等信息。
+
+# 和 CLIPVisionTower 不同的地方可能是模型具体是SigLip架构，而不是CLIP架构，这意味着视觉编码器是基于SigLip设计的。这两个视觉模型的结构细节和训练目标或预训练任务有所区别，但在多模态架构中作为视觉编码器的用途和接口设计基本类似。
+
+# 所以总结：
+
+# SiglipVisionTower 是用来获得SigLip视觉模型的表示，作为多模态学习中的视觉特征提取部分。
+
+# 代码实现和CLIP视觉编码器封装类似，封装预训练模型，冻结权重，提供接口提取指定层的视觉token特征。
+
+# 具体区别在于底层视觉编码器模型不同，SigLip是一个新兴的视觉Transformer模型。
+
+
 class SiglipVisionTower(nn.Module):
     def __init__(self, vision_tower, args, delay_load=False):
         super().__init__()

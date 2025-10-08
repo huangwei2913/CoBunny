@@ -11,6 +11,7 @@ moderation_msg = "YOUR INPUT VIOLATES OUR CONTENT MODERATION GUIDELINES. PLEASE 
 handler = None
 
 
+
 def disable_torch_init():
     """
     Disable the redundant torch default initialization to accelerate model creation.
