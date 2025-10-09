@@ -25,16 +25,28 @@ def rank0_print(*args):
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default=None)
-    model_type: Optional[str] = field(default=None)
-    version: Optional[str] = field(default=None)
+    model_type: Optional[str] = field(default=None)  #选择何种LLM
+    version: Optional[str] = field(default=None)  #选择何种对话模版
     freeze_backbone: bool = field(default=False)
     tune_mm_mlp_adapter: bool = field(default=False)
     unfreeze_mm_vision_tower: bool = field(default=False)  
     vision_tower: Optional[str] = field(default=None)
     unfreeze_vision_tower: bool = field(default=False)
-    use_s2: bool = field(default=False)
+    use_s2: bool = field(default=False)  #是否使用S2
+    mm_vision_select_layer: Optional[int] = field(default=-1)   # default to the last layer
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)
     mm_projector_type: Optional[str] = field(default='mlp2x_gelu')  #这个参数非常重要，它会指导如何建立投影层网络结构
+    mm_resampler_type: Optional[str] = field(default=None) #采用何种重采样器
+    mm_use_im_start_end: bool = field(default=False)
+    mm_use_im_patch_token: bool = field(default=True)
+    tune_mm_vision_resampler: bool = field(default=False)    
+    mm_mask_drop_mode: str = field(default="fixed")
+    mm_mask_drop_skip_percentage: float = field(default=0.)
+    mm_mask_drop_ratio: float = field(default=0.25)
+    mm_mask_drop_ratio_upper: Optional[float] = field(default=None)
+    mm_mask_drop_ratio_lower: Optional[float] = field(default=None)
+    mm_vision_select_feature: Optional[str] = field(default="patch")
+   
 
 
 
@@ -457,13 +469,10 @@ def train():
     # 该调用确保vision_tower使用正确的硬件资源和数据格式，为训练或推理做准备。
     vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
-
     data_args.image_processor = vision_tower.image_processor
-
     model.config.image_aspect_ratio = data_args.image_aspect_ratio
     model.config.tokenizer_padding_side = tokenizer.padding_side
     model.config.tokenizer_model_max_length = tokenizer.model_max_length
-
 
     #的主要作用是实现微调时只训练模型中视觉多模态MLP适配器（mm_projector）部分，而冻结模型其余参数。具体含义说明如下
     model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter

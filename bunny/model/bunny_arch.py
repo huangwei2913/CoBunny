@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 import torch
 
 from .multimodal_encoder.builder import build_vision_tower
+from .multimodal_resampler.builder import build_vision_resampler
 from .multimodal_projector.builder import build_vision_projector
 
 from bunny.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX
@@ -16,12 +17,15 @@ class BunnyMetaModel:
 
         if hasattr(config, "mm_vision_tower"):
             self.vision_tower = build_vision_tower(config, delay_load=not getattr(config, 'continuous_training', False))
+            #这个地方可以添加的，因为不传递的话，就是indentifymap
+            self.vision_resampler = build_vision_resampler(config, vision_tower=self.vision_tower)     
             if getattr(config, 'continuous_training', False):
                 config.continuous_training = False
             self.mm_projector = build_vision_projector(config)
 
+    #注意这里写法，其实不是获取命令行中的字符串
     def get_vision_tower(self):
-        vision_tower = getattr(self, 'vision_tower', None)
+        vision_tower = getattr(self, 'vision_tower', None)  #这只是从self对象拿到vision_tower属性（模型对象），如果是list则取第一个，否则原样返回
         if type(vision_tower) is list:
             vision_tower = vision_tower[0]
         return vision_tower
@@ -29,20 +33,44 @@ class BunnyMetaModel:
     def initialize_vision_modules(self, model_args):
         vision_tower = model_args.vision_tower
         #这个地方传递进了模型的视觉塔名称，我们要在这里加入
+        mm_vision_select_layer = model_args.mm_vision_select_layer
+        mm_vision_select_feature = model_args.mm_vision_select_feature
         pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter #这个其实就是预训练的适配器
 
         self.config.mm_vision_tower = vision_tower
+        self.config.mm_vision_select_layer = mm_vision_select_layer
+        self.config.mm_vision_select_feature = mm_vision_select_feature
 
         if self.get_vision_tower() is None:
             vision_tower = build_vision_tower(model_args)
-            self.vision_tower = vision_tower
+            vision_resampler = build_vision_resampler(model_args, vision_tower=vision_tower)
+            for k, v in vision_resampler.config.items():
+                setattr(self.config, k, v)
+            self.vision_tower = vision_tower            #给自身的vision_tower对象属性赋值
+            self.vision_resampler = vision_resampler           
         else:
             vision_tower = self.vision_tower
+            vision_resampler = self.vision_resampler
             vision_tower.load_model()
+            for p in self.vision_resampler.parameters():
+                p.requires_grad = True
+
 
         self.config.use_mm_proj = True
         self.config.mm_projector_type = getattr(model_args, 'mm_projector_type')
-        self.config.mm_hidden_size = vision_tower.hidden_size #投影层的输入特征维度要等于视觉编码器的特征维度
+        #也就是这个地方要判断一下行，，是否是取vision_resampler的hidden_size,也是要考虑的
+        self.config.mm_resampler_type = getattr(model_args, 'mm_resampler_type')
+        if self.config.mm_resampler_type=='masked_drop':
+            self.config.mm_hidden_size = vision_tower.hidden_size #投影层的输入特征维度要等于视觉编码器的特征维度
+        elif self.config.mm_resampler_type=='spatial_pool':
+            self.config.mm_hidden_size = vision_resampler.out_channels #投影层的输入特征维度要等于视觉编码器的特征维度
+        elif self.config.mm_resampler_type=='qformer':
+            self.config.mm_hidden_size = vision_resampler.hidden_size #投影层的输入特征维度要等于视觉编码器的特征维度
+        elif self.config.mm_resampler_type=='dynamic_compressor':
+            self.config.mm_hidden_size = vision_resampler.hidden_size #投影层的输入特征维度要等于视觉编码器的特征维度
+        else:
+            self.config.mm_hidden_size = vision_tower.hidden_size #投影层的输入特征维度要等于视觉编码器的特征维度
+
 
         if getattr(self, 'mm_projector', None) is None:
             self.mm_projector = build_vision_projector(self.config)
@@ -58,6 +86,8 @@ class BunnyMetaModel:
                 return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
 
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
+            incompatible_keys = self.vision_resampler.load_state_dict(get_w(mm_projector_weights, 'vision_resampler'), strict=False)
+            print(incompatible_keys)
 
 
 class BunnyMetaForCausalLM(ABC):
@@ -70,10 +100,25 @@ class BunnyMetaForCausalLM(ABC):
         return self.get_model().get_vision_tower()
 
     def encode_images(self, images):
-        image_features = self.get_model().get_vision_tower()(images)
-        image_features = self.get_model().mm_projector(image_features)
-        #
-        return image_features
+        #这里可以来控制,如果不是dynamic 
+        mm_resampler_type = getattr(self.config, 'mm_resampler_type', None)
+        if mm_resampler_type is None:  # 常规处理模式
+            image_features = self.get_model().get_vision_tower()(images)
+            image_features = self.get_model().mm_projector(image_features)
+            return image_features
+        else:  #如果是那几个
+            if mm_resampler_type=='dynamic_compressor':
+                image_features, image_size = self.get_model().get_vision_tower()(images)
+                image_features,_ = self.get_model().vision_resampler(image_features, forward_type='image',image_size=image_size)
+                image_features = self.get_model().mm_projector(image_features)
+                return image_features
+            else:
+                image_features = self.get_model().get_vision_tower()(images)
+                image_features = self.get_model().vision_resampler(image_features)
+                image_features = self.get_model().mm_projector(image_features)
+                return image_features    
+    
+
 
     # 也就说这个地方可以加入一个专家混合（MOE）层，这个层负责更加合理地融合来自多个视觉编码器的不同视觉特征
     def prepare_inputs_labels_for_multimodal(

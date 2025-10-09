@@ -1,12 +1,14 @@
-[2025-10-06 15:49:56,170] [WARNING] [runner.py:232:fetch_hostfile] Unable to find hostfile, will proceed with training with local resources only.
-Unfreezing MM Vision Tower.....................: True
-Unfreezing MM Vision Tower.....................: True
-the data path is ........................................ ./data/pretrain/test_write_visob_tower.json
+[2025-10-08 12:25:04,945] [WARNING] [runner.py:232:fetch_hostfile] Unable to find hostfile, will proceed with training with local resources only.
+the data path is ........................................ ./data/pretrain/filtered_data_compact.json
+the data path is ........................................ ./data/pretrain/filtered_data_compact.json
 Formatting inputs...Skip in lazy mode
 Checkpoint checkpoints-pretrain/bunny-phi-1.5-pretrain/checkpoint-1 missing trainer_state.json, training from scratch.
-the data path is ........................................ ./data/pretrain/test_write_visob_tower.json
 Formatting inputs...Skip in lazy mode
 Checkpoint checkpoints-pretrain/bunny-phi-1.5-pretrain/checkpoint-1 missing trainer_state.json, training from scratch.
-{'loss': 1.9739, 'grad_norm': 13.85221004486084, 'learning_rate': 0.0, 'epoch': 1.0}
-{'train_runtime': 1.3674, 'train_samples_per_second': 10.238, 'train_steps_per_second': 0.731, 'train_loss': 1.9738627672195435, 'epoch': 1.0}
-Detected VISIBLE_DEVICES=0,1: setting --include=localhost:0,1
+{'loss': 6.861, 'grad_norm': 8.834687232971191, 'learning_rate': 0.0, 'epoch': 0.0}
+{'loss': 7.2802, 'grad_norm': 5.813129901885986, 'learning_rate': 5.33049040511727e-07, 'epoch': 0.0}
+{'loss': 6.6757, 'grad_norm': 11.376642227172852, 'learning_rate': 1.066098081023454e-06, 'epoch': 0.0}
+{'loss': 6.8642, 'grad_norm': 7.593523979187012, 'learning_rate': 1.5991471215351813e-06, 'epoch': 0.0}
+{'loss': 7.3845, 'grad_norm': 4.798069477081299, 'learning_rate': 2.132196162046908e-06, 'epoch': 0.0}
+{'loss': 7.2014, 'grad_norm': 12.605640411376953, 'learning_rate': 2.6652452025586354e-06, 'epoch': 0.0}
+{'loss': 7.4541, 'grad_norm': 4.930788516998291, 'learning_rate': 3.1982942430703625e-06, 'epoch': 0.0}

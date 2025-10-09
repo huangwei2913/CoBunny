@@ -33,7 +33,6 @@ class BaseVisionTower(nn.Module):
 
         self.is_loaded = False
         self.args = args
-
         self.vision_tower_name = vision_tower_name
         self.select_layer = -2
         self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')

@@ -4,6 +4,7 @@ from .siglip.siglip_encoder import SiglipVisionTower, SiglipVisionTowerS2
 from .clip.clip_encoder import CLIPVisionTower
 from .dfn_clip_encoder import DfnClipVisionTower
 import logging
+from .oryx_vit import OryxViTWrapper
 
 #要明确知道每一个视觉编码器的输出
 def build_vision_tower(vision_tower_cfg, **kwargs):
@@ -25,6 +26,10 @@ def build_vision_tower(vision_tower_cfg, **kwargs):
         logging.info(f"Loading **Apple DFN CLIP** Vision Tower: {vision_tower}")
         return DfnClipVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
     
+    elif "oryx_vit" in vision_tower:
+        path = vision_tower.split(":")[1]
+        return OryxViTWrapper(vision_tower, path=path, args=vision_tower_cfg, **kwargs)
+
     elif 'clip' in vision_tower.lower():
         if use_s2:
             raise ValueError(f'Currently not supporting S2 for CLIP')

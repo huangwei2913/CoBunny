@@ -148,6 +148,98 @@ class SPP(nn.Module):
             x = self.linear_2(x)
         return x
 
+
+
+class SimpleMlp(nn.Module):
+    def __init__(self, in_channels, out_channels, twoview=False):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(in_channels, out_channels),
+            nn.GELU(),
+            nn.Linear(out_channels, out_channels)
+        )
+
+        embed_std = 1 / math.sqrt(out_channels)
+        self.image_newline = nn.Parameter(
+            nn.randn(out_channels) * embed_std
+        )
+        self.image_begin = nn.Parameter(
+            nn.randn(out_channels) * embed_std
+        )
+        self.image_end = nn.Parameter(
+            nn.randn(out_channels) * embed_std
+        )
+        
+        if twoview:
+            self.image_sep = nn.Parameter(
+                nn.randn(out_channels) * embed_std
+            )
+
+    def forward(self, x, size=(16,16), x2=None, size2=(16, 16), modalities='image'):
+
+        if modalities in ['image', 'text']:
+            h, w = size
+            dtype = x.dtype
+            x = x.reshape(x.shape[0], h, w, -1)
+            x = self.proj(x) #b,h,w, c
+            b, h, w, c = x.shape
+            x = nn.cat([
+                x,
+                self.image_newline.reshape(1, 1, 1, c).expand(b, h, 1, c).to(dtype)
+            ], dim=2)
+            x = x.reshape(b, -1, c)
+
+            if x2 is not None:
+                h2, w2 = size2
+                x2 = x2.reshape(x2.shape[0], h2, w2, -1)
+                x2 = self.proj(x2) #b,h,w, c
+                b2, h2, w2, c2 = x2.shape
+                x2 = nn.cat([
+                    x2,
+                    self.image_newline.reshape(1, 1, 1, c).expand(b, h2, 1, c).to(dtype)
+                ], dim=2)
+                x2 = x2.reshape(b, -1, c)
+                sep = self.image_sep.reshape(1, 1, -1).expand(b, 1, c2).to(dtype)
+                x = nn.cat([x, sep, x2], dim=1)
+            
+            assert b == 1
+            assert b2 == 1 # only support batch size 1
+
+            begin = self.image_begin.reshape(1, 1, -1).expand(b, 1, c).to(dtype)
+            end = self.image_end.reshape(1, 1, -1).expand(b, 1, c).to(dtype)
+            x = nn.cat([begin, x, end], dim=1)
+            return x
+        elif modalities in ['video', 'video_long']:
+            # x2 is the true feature, ignore x
+            h, w = size
+            dtype = x.dtype
+            x = x.reshape(x.shape[0], h, w, -1)
+            x = self.proj(x).mean() * 0.0
+
+            h2, w2 = size2
+            x2 = x2.reshape(x2.shape[0], h2, w2, -1)
+            x2 = self.proj(x2) + x #b, h, w, c
+
+            b2, h2, w2, c = x2.shape
+            x2 = nn.cat([
+                x2,
+                self.image_newline.reshape(1, 1, 1, c).expand(b2, h2, 1, c).to(dtype)
+            ], dim=2)
+
+            x2 = x2.reshape(b2, -1, c)
+
+            sep = self.image_sep.reshape(1, 1, -1).expand(b2, 1, c).to(dtype)
+            x2 = nn.cat([x2, sep], dim=1)
+
+            x2 = x2.flatten(0, 1)
+
+            begin = self.image_begin.reshape(1, -1).expand(1, c).to(dtype)
+            end = self.image_end.reshape(1, -1).expand(1, c).to(dtype)
+            x2 = nn.cat([begin, x2, end], dim=0)
+            x2 = x2.unsqueeze(0)
+            return x2
+
+
 #也就说我们可以在这里强制让视觉编码器，直接输出IdentityMap，特征向量
 def build_vision_projector(config, delay_load=False, **kwargs):
     projector_type = getattr(config, 'mm_projector_type', 'mlp2x_gelu')
@@ -156,6 +248,8 @@ def build_vision_projector(config, delay_load=False, **kwargs):
         return nn.Linear(config.mm_hidden_size, config.hidden_size)
      #这个里面的mm_hidden_size参数对应的是视觉编码器输出的嵌入的特征维度， 
      # 这里的hidden_size对应的是LLM Decoder期望的特征维度。每个token的特征维度都是一样的，例如llmaconfig是4096
+    elif projector_type == 'simple_mlp_twoview':
+        return SimpleMlp(config.mm_hidden_size, config.hidden_size, twoview=True)       #使用这个投影
 
     elif projector_type.startswith('mlp'):
         mlp_gelu_match = re.match(r'^mlp(\d+)x_gelu$', projector_type)
