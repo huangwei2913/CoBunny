@@ -8,6 +8,7 @@ bunny.egg-info/SOURCES.txt
 bunny.egg-info/dependency_links.txt
 bunny.egg-info/requires.txt
 bunny.egg-info/top_level.txt
+bunny/eval/configuration_bunny_phi.py
 bunny/eval/m4c_evaluator.py
 bunny/eval/model_vqa.py
 bunny/eval/model_vqa_cmmmu.py
@@ -15,6 +16,7 @@ bunny/eval/model_vqa_loader.py
 bunny/eval/model_vqa_mmbench.py
 bunny/eval/model_vqa_mmmu.py
 bunny/eval/model_vqa_science.py
+bunny/eval/modeling_bunny_phi.py
 bunny/model/__init__.py
 bunny/model/builder.py
 bunny/model/bunny_arch.py

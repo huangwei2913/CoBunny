@@ -29,11 +29,11 @@ def get_chunk(lst, n, k):
 
 # Custom dataset class
 class CustomDataset(Dataset):
-    def __init__(self, questions, image_folder, tokenizer, image_processor, model_config):
+    def __init__(self, questions, image_folder, tokenizer, model, model_config):
         self.questions = questions
         self.image_folder = image_folder
         self.tokenizer = tokenizer
-        self.image_processor = image_processor
+        self.model = model
         self.model_config = model_config
 
     def __getitem__(self, index):
@@ -49,8 +49,8 @@ class CustomDataset(Dataset):
         prompt = conv.get_prompt()
 
         image = Image.open(os.path.join(self.image_folder, image_file)).convert('RGB')
-        image_tensor = process_images([image], self.image_processor, self.model_config)[0]
-
+        #image_tensor = process_images([image], self.image_processor, self.model_config)[0]
+        image_tensor = self.model.process_images([image], self.model_config)[0]
         input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
 
         return input_ids, image_tensor
@@ -60,9 +60,9 @@ class CustomDataset(Dataset):
 
 
 # DataLoader
-def create_data_loader(questions, image_folder, tokenizer, image_processor, model_config, batch_size=1, num_workers=4):
+def create_data_loader(questions, image_folder, tokenizer, model, model_config, batch_size=1, num_workers=4):
     assert batch_size == 1, "batch_size must be 1"
-    dataset = CustomDataset(questions, image_folder, tokenizer, image_processor, model_config)
+    dataset = CustomDataset(questions, image_folder, tokenizer, model, model_config)
     data_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False)
     return data_loader
 
@@ -71,9 +71,28 @@ def eval_model(args):
     # Model
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
+    print("model_path is .....",model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name,
-                                                                           args.model_type)
+    print("model_name is .....",model_name)
+    #tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name,
+    #                                                                       args.model_type,tp_plan=None)
+
+
+    from .modeling_bunny_phi import BunnyPhiForCausalLM
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+    model = BunnyPhiForCausalLM.from_pretrained(
+        "/home/huangwei/Bunny-v1_0-3B",
+        low_cpu_mem_usage=True,
+        tp_plan=None,
+        use_safetensors=True,
+        local_files_only=True,
+    )
+
+    #from transformers import AutoImageProcessor
+
+    #image_processor = AutoImageProcessor.from_pretrained(model_path, local_files_only=True)
 
     questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")]
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
@@ -86,7 +105,7 @@ def eval_model(args):
         print(
             f'It seems that this is a plain model, but it is not using a mmtag prompt, auto switching to {args.conv_mode}.')
 
-    data_loader = create_data_loader(questions, args.image_folder, tokenizer, image_processor, model.config)
+    data_loader = create_data_loader(questions, args.image_folder, tokenizer, model, model.config)
 
     for (input_ids, image_tensor), line in tqdm(zip(data_loader, questions), total=len(questions)):
         idx = line["question_id"]
