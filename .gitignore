@@ -2,4 +2,9 @@ build/
 data/
 bunny/checkpoints-pretrain
 checkpoints-pretrain/
-
+eval/
+bunny/__pycache__
+**/__pycache__/
+dwt_outputs/
+stage1_channels/
+unik3d/

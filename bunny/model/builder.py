@@ -139,7 +139,10 @@ def load_pretrained_model(model_path, model_base, model_name, model_type, load_8
     else:
         if model_type == 'phi-1.5' or model_type == 'phi-2':
             tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
-            model = BunnyPhiForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
+            if 'tp_plan' in kwargs:
+                kwargs.pop('tp_plan')
+            print("model_path...HHHHHHHHHHHHHHHHHHHHHHHHHHHHHH.......",model_path)    
+            model = BunnyPhiForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, tp_plan=None, use_safetensors=True, **kwargs)
         elif model_type == 'phi-3':
             tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
             model = BunnyPhi3ForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
@@ -156,6 +159,8 @@ def load_pretrained_model(model_path, model_base, model_name, model_type, load_8
             tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
             model = BunnyLlamaForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
 
+
+    print("CB...............................HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHsssss")
     model.resize_token_embeddings(len(tokenizer))
 
     vision_tower = model.get_vision_tower()

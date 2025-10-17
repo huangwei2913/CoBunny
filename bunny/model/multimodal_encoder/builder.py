@@ -3,6 +3,8 @@ from .eva_clip.eva_clip_encoder import EvaClipVisionTower
 from .siglip.siglip_encoder import SiglipVisionTower, SiglipVisionTowerS2
 from .clip.clip_encoder import CLIPVisionTower
 from .dfn_clip_encoder import DfnClipVisionTower
+from .dino_encoder import DinoVisionTower
+from .midas_encoder import MiDaSVisionTower
 import logging
 from .oryx_vit import OryxViTWrapper
 
@@ -22,10 +24,19 @@ def build_vision_tower(vision_tower_cfg, **kwargs):
         else:
             return EvaClipVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
 
+
+    elif "midas" in vision_tower.lower():
+        logging.info(f"Loading **midas: {vision_tower}")
+        return MiDaSVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
+    
     elif "apple/dfn" in vision_tower.lower():
         logging.info(f"Loading **Apple DFN CLIP** Vision Tower: {vision_tower}")
         return DfnClipVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
     
+    elif "facebook/dinov3" in vision_tower.lower():
+        logging.info(f"Loading **dinov3** Vision Tower: {vision_tower}")
+        return DinoVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
+
     elif "oryx_vit" in vision_tower:
         path = vision_tower.split(":")[1]
         return OryxViTWrapper(vision_tower, path=path, args=vision_tower_cfg, **kwargs)

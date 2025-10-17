@@ -8,6 +8,7 @@ bunny.egg-info/SOURCES.txt
 bunny.egg-info/dependency_links.txt
 bunny.egg-info/requires.txt
 bunny.egg-info/top_level.txt
+bunny/eval/configuration_bunny_phi.py
 bunny/eval/m4c_evaluator.py
 bunny/eval/model_vqa.py
 bunny/eval/model_vqa_cmmmu.py
@@ -15,6 +16,7 @@ bunny/eval/model_vqa_loader.py
 bunny/eval/model_vqa_mmbench.py
 bunny/eval/model_vqa_mmmu.py
 bunny/eval/model_vqa_science.py
+bunny/eval/modeling_bunny_phi.py
 bunny/model/__init__.py
 bunny/model/builder.py
 bunny/model/bunny_arch.py
@@ -49,6 +51,8 @@ bunny/model/multimodal_encoder/base_encoder.py
 bunny/model/multimodal_encoder/builder.py
 bunny/model/multimodal_encoder/clip_encoder_dfn.py
 bunny/model/multimodal_encoder/dfn_clip_encoder.py
+bunny/model/multimodal_encoder/dino_encoder.py
+bunny/model/multimodal_encoder/midas_encoder.py
 bunny/model/multimodal_encoder/oryx_vit.py
 bunny/model/multimodal_encoder/clip/clip_encoder.py
 bunny/model/multimodal_encoder/eva_clip/eva_clip_encoder.py

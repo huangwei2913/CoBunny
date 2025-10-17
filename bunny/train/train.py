@@ -46,6 +46,7 @@ class ModelArguments:
     mm_mask_drop_ratio_upper: Optional[float] = field(default=None)
     mm_mask_drop_ratio_lower: Optional[float] = field(default=None)
     mm_vision_select_feature: Optional[str] = field(default="patch")
+    mm_dense_connector_type: Optional[str] = field(default='dci')  #密集投影层类型
    
 
 

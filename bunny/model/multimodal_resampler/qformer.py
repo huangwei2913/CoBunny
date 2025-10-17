@@ -38,9 +38,9 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_utils import (
     PreTrainedModel,
-    apply_chunking_to_forward,
-    find_pruneable_heads_and_indices,
-    prune_linear_layer,
+    #apply_chunking_to_forward,
+    #find_pruneable_heads_and_indices,
+    #prune_linear_layer,
 )
 from transformers.utils import logging
 from transformers.models.bert.configuration_bert import BertConfig
@@ -302,10 +302,85 @@ class BertAttention(nn.Module):
         self.output = BertSelfOutput(config)
         self.pruned_heads = set()
 
+
+    def find_pruneable_heads_and_indices(self, heads, num_heads, head_size, already_pruned_heads):
+        """
+        找出需要剪枝的头及其对应索引。
+
+        参数:
+            heads (set): 要剪枝的头索引集合
+            num_heads (int): 原始多头数量
+            head_size (int): 每个头的维度大小
+            already_pruned_heads (set): 已剪枝头的索引集合，用于更新
+
+        返回:
+            (heads, index): 
+            heads (set): 更新后的头索引集合
+            index (torch.LongTensor): 剩余未剪枝参数在权重矩阵中的索引位置
+        """
+        heads = set(heads) - already_pruned_heads
+        if len(heads) == 0:
+            return set(), torch.arange(num_heads * head_size)
+
+        mask = torch.ones(num_heads, head_size, dtype=torch.bool)
+        for head in heads:
+            mask[head] = False
+
+        mask = mask.view(-1)
+        index = torch.arange(num_heads * head_size)[mask]
+
+        return heads, index
+
+
+
+
+    def prune_linear_layer(self, layer: nn.Linear, index: torch.LongTensor, dim: int = 0) -> nn.Linear:
+        """
+        剪枝Linear层权重和偏置，保留index指定的通道维度部分。
+
+        参数:
+            layer: 需要剪枝的nn.Linear层
+            index: 剩余要保留的通道索引
+            dim: 剪枝方向，0-剪输入维度(行)，1-剪输出维度(列)
+
+        返回:
+            新的nn.Linear层，参数是剪枝后的权重和偏置，替换原层使用
+        """
+        # 复制权重参数
+        W = layer.weight.data.index_select(dim, index).clone().detach()
+        if layer.bias is not None:
+            if dim == 0:
+                b = layer.bias.data.clone().detach()
+            else:
+                b = layer.bias.data.index_select(0, index).clone().detach()
+        else:
+            b = None
+
+        # 新线性层的输入输出维度
+        if dim == 0:
+            new_in_features = W.size(1)
+            new_out_features = W.size(0)
+        else:
+            new_in_features = W.size(1)
+            new_out_features = W.size(0)
+            # 其实dim=1时，需要交换weight矩阵，但一般剪output维是dim=1，剪input维是dim=0
+
+        new_linear = nn.Linear(new_in_features, new_out_features, bias=b is not None).to(layer.weight.device)
+
+        with torch.no_grad():
+            new_linear.weight.copy_(W)
+            if b is not None:
+                new_linear.bias.copy_(b)
+
+        return new_linear
+
+
+
+
     def prune_heads(self, heads):
         if len(heads) == 0:
             return
-        heads, index = find_pruneable_heads_and_indices(
+        heads, index = self.find_pruneable_heads_and_indices(
             heads,
             self.self.num_attention_heads,
             self.self.attention_head_size,
@@ -313,10 +388,10 @@ class BertAttention(nn.Module):
         )
 
         # Prune linear layers
-        self.self.query = prune_linear_layer(self.self.query, index)
-        self.self.key = prune_linear_layer(self.self.key, index)
-        self.self.value = prune_linear_layer(self.self.value, index)
-        self.output.dense = prune_linear_layer(self.output.dense, index, dim=1)
+        self.self.query = self.prune_linear_layer(self.self.query, index)
+        self.self.key = self.prune_linear_layer(self.self.key, index)
+        self.self.value = self.prune_linear_layer(self.self.value, index)
+        self.output.dense = self.prune_linear_layer(self.output.dense, index, dim=1)
 
         # Update hyper params and store pruned heads
         self.self.num_attention_heads = self.self.num_attention_heads - len(heads)
@@ -405,6 +480,52 @@ class BertLayer(nn.Module):
         self.intermediate_query = BertIntermediate(config)
         self.output_query = BertOutput(config)
 
+
+
+    def apply_chunking_to_forward(self,forward_fn, chunk_size, chunk_dim, *input_tensors):
+        """
+        对输入张量按照chunk_size沿chunk_dim维度切分，逐块调用forward_fn再拼接。
+        参数:
+            forward_fn: 要执行的前向函数，输入是切出的张量块。
+            chunk_size: 每个块的大小。
+            chunk_dim: 按哪个维度切分。
+            *input_tensors: 传给forward_fn的输入张量列表，所有张量沿chunk_dim维长度应相等。
+        返回:
+            拼接后的forward_fn输出张量
+        """
+        if chunk_size <= 0:
+            # 不分块，直接调用
+            return forward_fn(*input_tensors)
+
+        # 验证所有input_tensors在切分维度长度一致
+        tensor_shape = input_tensors[0].shape[chunk_dim]
+        for t in input_tensors[1:]:
+            if t.shape[chunk_dim] != tensor_shape:
+                raise ValueError("所有输入张量在切分维度的长度必须相同")
+
+        if tensor_shape % chunk_size != 0:
+            raise ValueError(f"切分维度大小 {tensor_shape} 不能被 chunk_size {chunk_size} 整除")
+
+        chunks_num = tensor_shape // chunk_size
+
+        # 沿chunk_dim切分每个输入张量
+        input_chunks = [torch.chunk(t, chunks_num, dim=chunk_dim) for t in input_tensors]
+
+        output_chunks = []
+        for i in range(chunks_num):
+            chunk_inputs = [input_chunks[j][i] for j in range(len(input_chunks))]
+            chunk_output = forward_fn(*chunk_inputs)
+            output_chunks.append(chunk_output)
+
+        # 拼接所有输出
+        if isinstance(output_chunks[0], torch.Tensor):
+            return torch.cat(output_chunks, dim=chunk_dim)
+        else:
+            # 如果forward_fn返回tuple，逐元素拼接
+            return tuple(torch.cat(outputs, dim=chunk_dim) for outputs in zip(*output_chunks))
+
+
+
     def forward(
         self,
         hidden_states,
@@ -452,14 +573,14 @@ class BertLayer(nn.Module):
                     outputs + cross_attention_outputs[1:-1]
                 )  # add cross attentions if we output attention weights
 
-            layer_output = apply_chunking_to_forward(
+            layer_output = self.apply_chunking_to_forward(
                 self.feed_forward_chunk_query,
                 self.chunk_size_feed_forward,
                 self.seq_len_dim,
                 query_attention_output,
             )
             if attention_output.shape[1] > query_length:
-                layer_output_text = apply_chunking_to_forward(
+                layer_output_text = self.apply_chunking_to_forward(
                     self.feed_forward_chunk,
                     self.chunk_size_feed_forward,
                     self.seq_len_dim,
@@ -467,7 +588,7 @@ class BertLayer(nn.Module):
                 )
                 layer_output = torch.cat([layer_output, layer_output_text], dim=1)
         else:
-            layer_output = apply_chunking_to_forward(
+            layer_output = self.apply_chunking_to_forward(
                 self.feed_forward_chunk,
                 self.chunk_size_feed_forward,
                 self.seq_len_dim,

@@ -87,7 +87,10 @@ class DfnClipVisionTower(ClipVisionTower_):
 
 # 你需要用vars()或getattr()等方法直接访问Python对象属性查看这些值。
 
-# 这样解释，你就清楚为什么打印模型结构看不到它们，但可以直接访问到这些属性了。这些属性中，ln_post是PyTorch中LayerNorm层的一个实例，它本身有一个官方定义的属性normalized_shape，代表归一化维度大小，所以你能通过clip_model.visual.ln_post.normalized_shape直接访问。而image_size和patch_size通常是VisionTransformer类中特意设置的模型配置属性，虽然它们不是网络层（nn.Module），因此在打印模型结构时不会显示，但它们是该模型实例的普通对象属性，可以直接访问。
+# 这样解释，你就清楚为什么打印模型结构看不到它们，但可以直接访问到这些属性了。这些属性中，ln_post是PyTorch中LayerNorm层的一个实例，
+# 它本身有一个官方定义的属性normalized_shape，代表归一化维度大小，所以你能通过clip_model.visual.ln_post.normalized_shape直接访问。
+# 而image_size和patch_size通常是VisionTransformer类中特意设置的模型配置属性，虽然它们不是网络层（nn.Module），因此在打印模型结构时不会显示，
+# 但它们是该模型实例的普通对象属性，可以直接访问。
 
 # 如果你想查看这些属性，可以这样做：
 
