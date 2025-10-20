@@ -36,3 +36,6 @@ deepspeed bunny/train/train.py \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
     --report_to none | tee 2>&1 ./checkpoints-pretrain/$OUTPUT_DIR/log.txt
+
+
+#强制dinov3模型返回最后隐藏状态的时候是cls+patchsss,使用mm_vision_select_feature

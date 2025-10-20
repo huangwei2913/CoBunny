@@ -102,8 +102,8 @@ class BunnyMetaForCausalLM(ABC):
     def encode_images(self, images):
         #这里可以来控制,如果不是dynamic 
         mm_resampler_type = getattr(self.config, 'mm_resampler_type', None)
-        if mm_resampler_type is None:  # 常规处理模式
-            image_features = self.get_model().get_vision_tower()(images)
+        if mm_resampler_type is None:  # 常规处理模式, 这里我们希望的
+            image_features, _ = self.get_model().get_vision_tower()(images)  #这里是希望能返回中间层特征
             image_features = self.get_model().mm_projector(image_features)
             return image_features
         else:  #如果是那几个
@@ -144,7 +144,7 @@ class BunnyMetaForCausalLM(ABC):
             image_features = torch.split(image_features, split_sizes, dim=0)
             image_features = [x.flatten(0, 1).to(self.device) for x in image_features]
         else:
-            image_features = self.encode_images(images).to(self.device)
+            image_features  = self.encode_images(images).to(self.device)   #这个地方可能是不需要的
 
         # Let's just add dummy tensors if they do not exist,
         # it is a headache to deal with None all the time.
@@ -218,6 +218,9 @@ class BunnyMetaForCausalLM(ABC):
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
 
+
+        #这个地方有一个隐含的错误，如果Token indices sequence length is longer than the specified maximum sequence length 
+        # for this model (3052 > 2048). Running this sequence through the model will result in indexing errors（我们在最后面再来修改*************）
         # Truncate sequences to max length as image embeddings can make the sequence longer
         tokenizer_model_max_length = getattr(self.config, 'tokenizer_model_max_length', None)
         if tokenizer_model_max_length is not None:

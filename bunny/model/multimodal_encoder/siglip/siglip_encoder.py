@@ -3,7 +3,7 @@ import torch.nn as nn
 
 from transformers import SiglipVisionModel, SiglipImageProcessor, SiglipVisionConfig
 from bunny.util.s2wrapper import forward as multiscale_forward
-
+from bunny.util.merge import bipartite_soft_matching_merge
 
 # SiglipVisionTower 模块的功能和之前我们讨论的 CLIPVisionTower 基本类似，都是封装了一个预训练的视觉Transformer模型来做视觉特征提取。核心功能是：
 
@@ -57,20 +57,28 @@ class SiglipVisionTower(nn.Module):
 
         return image_features
 
+
+    #这里有可能是一个隐藏的bug，如果要处理的是多个影像的时候，如何返回中间层结果
     def forward(self, images):
+        
         if type(images) is list:
             image_features = []
+            image_forward_outs = [] 
             for image in images:
                 image_forward_out = self.vision_tower(image.to(device=self.device, dtype=self.dtype).unsqueeze(0),
                                                       output_hidden_states=True)
                 image_feature = self.feature_select(image_forward_out).to(image.dtype)
                 image_features.append(image_feature)
+                image_forward_outs.append(image_forward_out)
+            image_forward_outs = torch.cat(image_forward_outs, dim=0)
+
         else:
             image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype),
                                                    output_hidden_states=True)
             image_features = self.feature_select(image_forward_outs).to(images.dtype)
+            
 
-        return image_features
+        return image_features, image_forward_outs
 
     @property
     def dummy_feature(self):
@@ -141,13 +149,26 @@ class SiglipVisionTowerS2(SiglipVisionTower):
             for image in images:
                 image_feature = self.multiscale_forward(self.forward_feature, image.unsqueeze(0),
                                                         img_sizes=self.s2_scales, max_split_size=self.s2_split_size)
+                
+
+                #r = image_feature.shape[1] // 2
+                #image_feature = bipartite_soft_matching_merge(image_feature,r,image_feature)
                 image_features.append(image_feature)
         else:
             image_features = self.multiscale_forward(self.forward_feature, images, img_sizes=self.s2_scales,
                                                      max_split_size=self.s2_split_size)
+            
+            #r = image_features.shape[1] // 2
+            #image_features = bipartite_soft_matching_merge(image_features,r,image_features)
+
 
         return image_features
 
     @property
     def hidden_size(self):
         return self.config.hidden_size * len(self.s2_scales)
+    
+
+    @property
+    def patch_size(self):
+        return self.config.patch_size

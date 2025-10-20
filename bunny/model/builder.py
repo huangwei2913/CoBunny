@@ -160,7 +160,6 @@ def load_pretrained_model(model_path, model_base, model_name, model_type, load_8
             model = BunnyLlamaForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
 
 
-    print("CB...............................HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHsssss")
     model.resize_token_embeddings(len(tokenizer))
 
     vision_tower = model.get_vision_tower()

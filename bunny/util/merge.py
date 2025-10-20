@@ -18,6 +18,34 @@ def do_nothing(x, mode=None):
     return x
 
 
+
+def bipartite_soft_matching_merge(metric: torch.Tensor, r: int, x: torch.Tensor, mode: str = "mean") -> torch.Tensor:
+    protected = 0
+    t = metric.shape[1]
+    r = min(r, (t - protected) // 2)
+    if r <= 0:
+        return x
+
+    with torch.no_grad():
+        metric = metric / metric.norm(dim=-1, keepdim=True)
+        a, b = metric[..., ::2, :], metric[..., 1::2, :]
+        scores = a @ b.transpose(-1, -2)
+        node_max, node_idx = scores.max(dim=-1)
+        edge_idx = node_max.argsort(dim=-1, descending=True)[..., None]
+        unm_idx = edge_idx[..., r:, :]
+        src_idx = edge_idx[..., :r, :]
+        dst_idx = node_idx[..., None].gather(dim=-2, index=src_idx)
+
+        src, dst = x[..., ::2, :], x[..., 1::2, :]
+        n, t1, c = src.shape
+        unm = src.gather(dim=-2, index=unm_idx.expand(n, t1 - r, c))
+        src = src.gather(dim=-2, index=src_idx.expand(n, r, c))
+        dst = dst.scatter_reduce(-2, dst_idx.expand(n, r, c), src, reduce=mode)
+
+        return torch.cat([unm, dst], dim=1)
+
+
+
 def bipartite_soft_matching(
     metric: torch.Tensor,
     r: int,
