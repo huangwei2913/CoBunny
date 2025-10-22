@@ -114,8 +114,6 @@ class CrossAttention(nn.Module):
         return x
 
 
-
-
 class CrossAttentionBlock(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
@@ -141,7 +139,7 @@ class CrossAttentionBlock(nn.Module):
 
 
 #建立一个自适应的多视觉编码器特征融合，首先合并不同编码器的token,然后通过找到与每一个token最相似的分层token
-#然后将分层tokeen与分层token合并
+#然后将分层tokeen与分层token合并，可
 class AdaptiveConcatenationVisionTower(nn.Module):
     def __init__(self,
                  vision_tower,
@@ -172,7 +170,7 @@ class AdaptiveConcatenationVisionTower(nn.Module):
         for name in vision_tower_name_list:
             if name =="facebook/dinov3-convnext-large-pretrain-lvd1689m":
                 dinov3_args = deepcopy(args)
-                dinov3_args.freeze_vision = True
+                # dinov3_args.freeze_vision = True  # Freeze vision not needed for DinoVisionTower
                 dino_vision_tower = DinoVisionTower(name, dinov3_args)  # 224 image_size
                 dino_vision_tower.load_model()
                 self.vision_towers.append(dino_vision_tower) 

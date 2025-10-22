@@ -800,7 +800,7 @@ def create_siglip_vit(
         path = snapshot_download(repo_id="THUdyh/Oryx-ViT")
         ckpt = os.path.join(path, "oryx_vit.pth")
 
-    print('loading vision backbone from', ckpt)
+    print('loading vision backbone from.....................................................', ckpt)
 
     state_dict = torch.load(ckpt, map_location="cpu")
 

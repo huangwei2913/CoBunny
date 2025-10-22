@@ -12,7 +12,7 @@ deepspeed bunny/train/train.py \
     --model_name_or_path /home/huangwei/microsoft/phi-1_5 \
     --model_type $MODEL_TYPE \
     --version plain \
-    --data_path ./data/pretrain/test_write_visob_tower.json \
+    --data_path ./data/pretrain/filtered_data_compact.json \
     --image_folder ./data/pretrain/images \
     --vision_tower  $VISION_TOWER \
     --unfreeze_mm_vision_tower True \
