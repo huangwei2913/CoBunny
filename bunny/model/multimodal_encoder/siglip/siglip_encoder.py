@@ -58,27 +58,25 @@ class SiglipVisionTower(nn.Module):
         return image_features
 
 
-    #这里有可能是一个隐藏的bug，如果要处理的是多个影像的时候，如何返回中间层结果
     def forward(self, images):
         
         if type(images) is list:
-            image_features = []
-            image_forward_outs = [] 
+            all_hidden_states = []
             for image in images:
                 image_forward_out = self.vision_tower(image.to(device=self.device, dtype=self.dtype).unsqueeze(0),
                                                       output_hidden_states=True)
-                image_feature = self.feature_select(image_forward_out).to(image.dtype)
-                image_features.append(image_feature)
-                image_forward_outs.append(image_forward_out)
-            image_forward_outs = torch.cat(image_forward_outs, dim=0)
+                hidden_states = image_forward_out.hidden_states
+                all_hidden_states.append(hidden_states)
+            raise NotImplementedError("SiglipVisionTower should ideally process a single batch for simplicity, or have proper list handling.")
 
         else:
-            image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype),
-                                                   output_hidden_states=True)
-            image_features = self.feature_select(image_forward_outs).to(images.dtype)
-            
-
-        return image_features, image_forward_outs
+            image_forward_outs = self.vision_tower(
+                    images.to(device=self.device, dtype=self.dtype),
+                    output_hidden_states=True
+            )
+            # 🛠️ 返回完整的 hidden_states (一个 tuple/list of tensors)
+            # image_forward_outs.hidden_states 是所有层的特征
+            return image_forward_outs.hidden_states
 
     @property
     def dummy_feature(self):
@@ -124,6 +122,16 @@ class SiglipVisionTowerS2(SiglipVisionTower):
             self.image_processor.size['height'] = self.image_processor.size['width'] = self.s2_image_size
             self.image_processor.crop_size['height'] = self.image_processor.crop_size['width'] = self.s2_image_size
 
+    # 1. 新增方法：获取所有层的特征
+    def forward_all_features(self, images):
+        """
+        执行模型前向传播，返回所有 hidden states (一个 tuple/list of tensors)
+        """
+        image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype),
+                                               output_hidden_states=True)
+        return image_forward_outs.hidden_states
+
+
     def load_model(self):
         if self.is_loaded:
             return
@@ -139,30 +147,54 @@ class SiglipVisionTowerS2(SiglipVisionTower):
 
     def forward_feature(self, images):
         image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype),
-                                               output_hidden_states=True)
+                                               output_hidden_states=True, interpolate_pos_encoding=True)
         image_features = self.feature_select(image_forward_outs).to(images.dtype)
         return image_features
 
     def forward(self, images):
         if type(images) is list:
-            image_features = []
+            all_processed_features = []
             for image in images:
-                image_feature = self.multiscale_forward(self.forward_feature, image.unsqueeze(0),
-                                                        img_sizes=self.s2_scales, max_split_size=self.s2_split_size)
-                
-
-                #r = image_feature.shape[1] // 2
-                #image_feature = bipartite_soft_matching_merge(image_feature,r,image_feature)
-                image_features.append(image_feature)
-        else:
-            image_features = self.multiscale_forward(self.forward_feature, images, img_sizes=self.s2_scales,
-                                                     max_split_size=self.s2_split_size)
+                s2_feature = self.multiscale_forward(
+                    self.forward_feature, 
+                    image.unsqueeze(0), # 确保输入是 B=1
+                    img_sizes=self.s2_scales, 
+                    max_split_size=self.s2_split_size
+                )
+                all_processed_features.append(s2_feature)
             
-            #r = image_features.shape[1] // 2
-            #image_features = bipartite_soft_matching_merge(image_features,r,image_features)
+            # 返回所有图像的 S2 特征列表 (如果需要返回所有层，列表处理需要更复杂的逻辑)
+            return all_processed_features 
 
-
-        return image_features
+        else: 
+            # 1. 获取所有中间层特征 (原始特征)
+            # all_hidden_states 是一个 list 或 tuple of tensors
+            all_hidden_states = list(self.forward_all_features(images))
+            
+            # 2. 提取 selected layer 的特征，进行 S2 处理
+            # 传入的 model 是 forward_feature，它只返回 selected layer 的特征
+            s2_feature = self.multiscale_forward(
+                self.forward_feature, 
+                images, 
+                img_sizes=self.s2_scales,
+                max_split_size=self.s2_split_size
+                # 假设 Siglip 没有 prefix token
+            )
+            
+            # 3. 计算 select_layer 在列表中的正确索引
+            num_layers = len(all_hidden_states)
+            # 例如：如果 select_layer=-2, num_layers=13，则 target_idx=11
+            target_idx = num_layers + self.select_layer if self.select_layer < 0 else self.select_layer
+            
+            # 4. 创建要返回的第二个值：替换后的所有层特征
+            # 我们对 all_hidden_states 进行复制并替换，以防外部代码意外修改原始列表
+            combined_hidden_states = list(all_hidden_states) 
+            combined_hidden_states[target_idx] = s2_feature # 替换！
+            
+            # 5. 返回两个值
+            # 第一个值：S2 处理后的特征
+            # 第二个值：包含 S2 特征和所有中间层特征的列表
+            return s2_feature, combined_hidden_states
 
     @property
     def hidden_size(self):

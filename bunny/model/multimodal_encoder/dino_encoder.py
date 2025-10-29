@@ -70,7 +70,7 @@ class DinoVisionTower(BaseVisionTower):
         self.select_feature = 'cls_patch'
         self.is_loaded = False
         self.model_name = "dinounet_b"    #默认设置成这个模型
-        self.interaction_indexes = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        self.interaction_indexes = [2,  5,  8,  11]
         self.target_dim  = 768  #假设是这个大小
         self.target_embed_dim = getattr(self, "target_embed_dim", self.target_dim )
         self.target_grid_size = getattr(self, "target_grid_size", self._patch_size)
@@ -93,6 +93,7 @@ class DinoVisionTower(BaseVisionTower):
         print(f"   Interaction layer indices: {interaction_indexes}")
         self.dinov3_backbone = load_dinov3_model(self.model_name,self.pretrained_path)
         self._hidden_size = self.dinov3_backbone.embed_dim
+        print(f"   _hidden_size  is...............: {self._hidden_size}")
         self.vision_tower = self.dinov3_backbone
         self.vision_tower.requires_grad_(self.unfreeze_mm_vision_tower)
         self.image_processor = AutoImageProcessor.from_pretrained(self._vision_tower_name)  #直接用modelscope里面的imageprocessor
@@ -206,6 +207,10 @@ class DinoVisionTower(BaseVisionTower):
     @property
     def patch_size(self):
         return self.vision_tower.patch_size
+
+    @property
+    def layer_count(self):
+        return len(self.interaction_indexes)
 
     @property
     def hidden_size(self):

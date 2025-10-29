@@ -17,7 +17,7 @@ def build_vision_tower(vision_tower_cfg, **kwargs):
         if use_s2:
             return SiglipVisionTowerS2(vision_tower, args=vision_tower_cfg, **kwargs)
         else:
-            return SiglipVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
+            return SiglipVisionTowerS2(vision_tower, args=vision_tower_cfg, **kwargs)
     elif 'eva' in vision_tower.lower():
         if use_s2:
             raise ValueError(f'Currently not supporting S2 for EVA-CLIP')

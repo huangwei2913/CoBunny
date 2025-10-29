@@ -803,9 +803,7 @@ import torch.distributed as dist
 class OryxViTWrapper(nn.Module):
     def __init__(self, vision_tower, path, args, delay_load=False):
         super().__init__()
-
         self.is_loaded = False
-
         self.vision_tower_name = vision_tower
         self.args = args
         self.path = path
@@ -813,12 +811,12 @@ class OryxViTWrapper(nn.Module):
         if self.select_layer < -1: self.select_layer += 1
         self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
         self.output_dim = 1152
-        self._num_layers = 27  # 总层数 L
+        self._num_layers = 27 # 总层数 L
         self.target_embed_dim = self.output_dim
         self.patch_size = 16
         self.target_grid_size = 384 // self.patch_size # 24
         self.target_N = self.target_grid_size * self.target_grid_size # 576
-        self.interaction_indexes = [23, 24, 25, 26]
+        self.interaction_indexes =[2,5,10,26]
 
         if not delay_load:
             self.load_model()
@@ -903,8 +901,8 @@ class OryxViTWrapper(nn.Module):
             last_layer_features, all_intermidiate_features, image_size = self.forward_func(images, cal_attn_pool=cal_attn_pool)
 
         # 返回逻辑与 DinoVisionTower 相似
-        #print("last_layer_features......................",last_layer_features.shape)
-        #print("all_intermidiate_features......................",all_intermidiate_features.shape)
+        print("last_layer_features......................",last_layer_features.shape)
+        print("all_intermidiate_features......................",all_intermidiate_features.shape)
         return last_layer_features, image_size, all_intermidiate_features
 
     @property
@@ -923,6 +921,10 @@ class OryxViTWrapper(nn.Module):
     def hidden_size(self):
         return self.output_dim
 
+    @property
+    def layer_count(self):
+        return len(self.interaction_indexes)
+    
     @property
     def config(self):
         return type('OryxConfigWrapper', (), {
