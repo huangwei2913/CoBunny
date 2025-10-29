@@ -108,7 +108,7 @@ class BunnyMetaForCausalLM(ABC):
             return image_features
         else:  #如果是那几个
             if mm_resampler_type=='dynamic_compressor':
-                image_features, image_size = self.get_model().get_vision_tower()(images)
+                image_features, image_size, _ = self.get_model().get_vision_tower()(images)
                 image_features,_ = self.get_model().vision_resampler(image_features, forward_type='image',image_size=image_size)
                 image_features = self.get_model().mm_projector(image_features)
                 return image_features

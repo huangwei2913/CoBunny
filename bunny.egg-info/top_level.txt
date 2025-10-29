@@ -1,7 +1,6 @@
 build
 bunny
 checkpoints-pretrain
-data
 dinov3
 eval
 script

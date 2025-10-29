@@ -33,11 +33,11 @@ def build_vision_tower(vision_tower_cfg, **kwargs):
         logging.info(f"Loading **Apple DFN CLIP** Vision Tower: {vision_tower}")
         return DfnClipVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
     
-    elif "facebook/dinov3" in vision_tower.lower():
+    elif "facebook/dinov3" in vision_tower.lower():   #在这里使用dinov3
         logging.info(f"Loading **dinov3** Vision Tower: {vision_tower}")
         return DinoVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
 
-    elif "oryx_vit" in vision_tower:
+    elif "oryx_vit" in vision_tower:  #在这里使用可变分辨率的vit
         path = vision_tower.split(":")[1]
         return OryxViTWrapper(vision_tower, path=path, args=vision_tower_cfg, **kwargs)
 

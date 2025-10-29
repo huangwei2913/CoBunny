@@ -48,7 +48,7 @@ def load_dinov3_model(model_name: str, pretrained_path: str = None) -> DinoVisio
         model = model_factory(pretrained=False)
         # Load custom weights
         #state_dict = torch.load(pretrained_path, map_location="cpu")
-        sd = load_file("/home/huangwei/.cache/modelscope/hub/models/facebook/dinov3-convnext-large-pretrain-lvd1689m/model.safetensors")
+        sd = load_file("/mnt/facebook/dinov3-convnext-large-pretrain-lvd1689m/model.safetensors")
         model.load_state_dict(sd, strict=False)
         print("Successfully loaded custom pretrained weights")
     else:
@@ -76,7 +76,7 @@ class DinoVisionTower(BaseVisionTower):
         self.target_grid_size = getattr(self, "target_grid_size", self._patch_size)
         self.target_N = self.target_grid_size * self.target_grid_size
 
-        self.pretrained_path =  "/home/huangwei/.cache/modelscope/hub/models/facebook/dinov3-convnext-large-pretrain-lvd1689m"   
+        self.pretrained_path =  "/mnt/facebook/dinov3-convnext-large-pretrain-lvd1689m"   
         if not self.delay_load:
             self.load_model()
         else:
@@ -137,7 +137,7 @@ class DinoVisionTower(BaseVisionTower):
                         feat, cls = layer_out
                         feat = feat.to(images.dtype)
                         cls =  cls.to(images.dtype)
-                        #print(f"Layer {i} feat shape: {feat.shape}, cls shape: {cls.shape}, dtype: {feat.dtype}")
+                        print(f"Layer {i} feat shape: {feat.shape}, cls shape: {cls.shape}, dtype: {feat.dtype}")
                     else:
                         feat, cls = layer_out, None
                         feat = feat.to(images.dtype)
@@ -175,9 +175,21 @@ class DinoVisionTower(BaseVisionTower):
                             align_corners=False
                         ).permute(0, 2, 1).contiguous()  # [B, target_N, D]
                         feat_proj = feat_interp
+                        
+                    if cls is not None:
+                    # 将 cls 投影到 target_embed_dim (如果需要的话，但通常 DINOv3 C=D)
+                        cls_proj = cls.unsqueeze(1) # [B, 1, D]
+                    # 拼接到 Patch Tokens 之前
+                    feat_proj = torch.cat([cls_proj, feat_proj], dim=1)
                     aligned_layers.append(feat_proj.to(images.dtype) )  # [B, target_N, D]
+
                 allintermidieaidfeatures = torch.cat(aligned_layers, dim=1)  
-                #print(f" all patch features whoese output shape is ......................: {allintermidieaidfeatures.shape}, dtype: {allintermidieaidfeatures.dtype}")
+                print(f" all patch features whoese output shape is ......................: {allintermidieaidfeatures.shape}, dtype: {allintermidieaidfeatures.dtype}")
+                print(f" aligned_layers[-1] output shape is ......................: {aligned_layers[-1].shape}, dtype: {aligned_layers[-1].dtype}")
+                if self._num_patches_cached is None:
+                    seq_len = aligned_layers[-1].shape[1]
+                    self._num_patches_cached = seq_len - 1  # 一个图像被分解出的 patch 数量，不包括 CLS
+
                 return aligned_layers[-1] , allintermidieaidfeatures
   
 

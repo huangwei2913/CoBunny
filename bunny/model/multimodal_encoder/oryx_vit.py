@@ -17,7 +17,6 @@ from typing import (
 )
 
 from huggingface_hub import snapshot_download
-
 from torch.utils.checkpoint import checkpoint
 import torch
 import torch.nn as nn
@@ -36,7 +35,6 @@ try:
 except:
     print('Wrong timm version')
 
-from flash_attn import flash_attn_func, flash_attn_varlen_func
 
 from typing import Optional
 
@@ -51,6 +49,97 @@ if 'EVAL_LARGE' in os.environ:
     EVAL_LARGE = True
 else:
     EVAL_LARGE = False
+
+
+
+def naive_flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=False):
+
+    batch_size, seqlen_q, nheads, headdim = q.shape
+    seqlen_k = k.shape[1]
+
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** -0.5
+
+    q = q.permute(0, 2, 1, 3)  # (B, H, N, D)
+    k = k.permute(0, 2, 3, 1)  # (B, H, D, N)
+    v = v.permute(0, 2, 1, 3)  # (B, H, N, D)
+
+    # 计算注意力得分
+    attn_scores = torch.matmul(q, k) * softmax_scale
+
+    # 应用因果掩码
+    if causal:
+        causal_mask = torch.triu(torch.ones(seqlen_q, seqlen_k, device=q.device, dtype=torch.bool), diagonal=1)
+        attn_scores.masked_fill_(causal_mask, float('-inf'))
+
+    # 应用softmax
+    attn_weights = torch.softmax(attn_scores, dim=-1)
+    
+    # 应用dropout
+    if dropout_p > 0.0:
+        attn_weights = torch.dropout(attn_weights, p=dropout_p, train=True) # 注意：这里只是模拟，torch.dropout的实际行为可能不同
+
+    # 计算输出
+    output = torch.matmul(attn_weights, v)
+
+    # 恢复原始形状
+    output = output.permute(0, 2, 1, 3) # (B, N, H, D) -> (B, N, H * D)
+    
+    # 将头维度合并
+    output = output.reshape(batch_size, seqlen_q, -1)
+    
+    return output
+
+
+def naive_flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, softmax_scale=None, causal=False):
+
+    
+    # 获取参数
+    nheads = q.shape[1]
+    headdim = q.shape[2]
+    num_sequences = len(cu_seqlens_q) - 1
+    
+    outputs = []
+
+    # 逐个序列处理
+    for i in range(num_sequences):
+        start_q, end_q = cu_seqlens_q[i], cu_seqlens_q[i+1]
+        start_k, end_k = cu_seqlens_k[i], cu_seqlens_k[i+1]
+        
+        # 提取单个序列的q, k, v
+        q_i = q[start_q:end_q, :, :].unsqueeze(0)  # (1, seq_len_i, nheads, headdim)
+        k_i = k[start_k:end_k, :, :].unsqueeze(0)
+        v_i = v[start_k:end_k, :, :].unsqueeze(0)
+        
+        # 使用标准的缩放点积注意力
+        # flash_attn_func要求输入为 (B, N, H, D)
+        q_i = q_i.permute(0, 2, 1, 3) # (1, nheads, seq_len_i, headdim)
+        k_i = k_i.permute(0, 2, 1, 3)
+        v_i = v_i.permute(0, 2, 1, 3)
+        
+        if softmax_scale is None:
+            softmax_scale = q_i.shape[-1] ** -0.5
+        
+        attn_scores = torch.matmul(q_i, k_i.permute(0, 1, 3, 2)) * softmax_scale
+        
+        # 应用因果掩码
+        if causal:
+            seq_len_i = q_i.shape[2]
+            causal_mask = torch.triu(torch.ones(seq_len_i, seq_len_i, device=q.device, dtype=torch.bool), diagonal=1)
+            attn_scores.masked_fill_(causal_mask, float('-inf'))
+        
+        attn_weights = torch.softmax(attn_scores, dim=-1)
+        output_i = torch.matmul(attn_weights, v_i)
+
+        # 恢复形状并存储
+        output_i = output_i.permute(0, 2, 1, 3).squeeze(0) # (seq_len_i, nheads, headdim)
+        outputs.append(output_i)
+        
+    return torch.cat(outputs, dim=0)
+
+
+
+
 
 def _no_grad_trunc_normal_(tensor, mean, std, a, b):
     # Cut & paste from PyTorch official master until it's in a few official releases - RW
@@ -92,24 +181,6 @@ def _no_grad_trunc_normal_(tensor, mean, std, a, b):
 
 def trunc_normal_(tensor, mean=0.0, std=1.0, a=-2.0, b=2.0):
     # type: (torch.Tensor, float, float, float, float) -> torch.Tensor
-    r"""The original timm.models.layers.weight_init.trunc_normal_ can not handle bfloat16 yet, here we first
-    convert the tensor to float32, apply the trunc_normal_() in float32, and then convert it back to its orignal dtype.
-    Fills the input Tensor with values drawn from a truncated normal distribution. The values are effectively drawn
-    from the normal distribution :math:`\mathcal{N}(\text{mean}, \text{std}^2)`
-    with values outside :math:`[a, b]` redrawn until they are within
-    the bounds. The method used for generating the random values works
-    best when :math:`a \leq \text{mean} \leq b`.
-    Args:
-        tensor: an n-dimensional `torch.Tensor`
-        mean: the mean of the normal distribution
-        std: the standard deviation of the normal distribution
-        a: the minimum cutoff value
-        b: the maximum cutoff value
-    Examples:
-        >>> w = torch.empty(3, 5)
-        >>> nn.init.trunc_normal_(w)
-    """
-
     with torch.no_grad():
         dtype = tensor.dtype
         tensor_fp32 = tensor.float()
@@ -177,7 +248,7 @@ class Attention(nn.Module):
             k = k.permute(0, 2, 1, 3)
             v = v.permute(0, 2, 1, 3)
             max_seqlen = torch.max(cu_slens[1:] - cu_slens[:-1]).item()
-            x = flash_attn_varlen_func(
+            x = naive_flash_attn_varlen_func(
                 q.squeeze(0),
                 k.squeeze(0),
                 v.squeeze(0),
@@ -197,7 +268,7 @@ class Attention(nn.Module):
             q = q.permute(0, 2, 1, 3)   # B, num_heads, N, C -> B, N, num_heads, C
             k = k.permute(0, 2, 1, 3)
             v = v.permute(0, 2, 1, 3)
-            x = flash_attn_func(q, k, v, softmax_scale=self.scale) # -> b, n, h, c
+            x = naive_flash_attn_func(q, k, v, softmax_scale=self.scale) # -> b, n, h, c
 
             x = x.reshape(B, N, -1)
             x = self.proj(x)
@@ -271,14 +342,7 @@ class Block(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-    """Vision Transformer
-
-    A PyTorch impl of : `An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale`
-        - https://arxiv.org/abs/2010.11929
-    """
-
     dynamic_img_size: Final[bool]
-
     def __init__(
         self,
         img_size: Union[int, Tuple[int, int]] = 224,
@@ -315,33 +379,7 @@ class VisionTransformer(nn.Module):
         mlp_layer: Type[nn.Module] = Mlp,
         ignore_head: bool = False,
     ) -> None:
-        """
-        Args:
-            img_size: Input image size.
-            patch_size: Patch size.
-            in_chans: Number of image input channels.
-            num_classes: Mumber of classes for classification head.
-            global_pool: Type of global pooling for final sequence (default: 'token').
-            embed_dim: Transformer embedding dimension.
-            depth: Depth of transformer.
-            num_heads: Number of attention heads.
-            mlp_ratio: Ratio of mlp hidden dim to embedding dim.
-            qkv_bias: Enable bias for qkv projections if True.
-            init_values: Layer-scale init values (layer-scale enabled if not None).
-            class_token: Use class token.
-            no_embed_class: Don't include position embeddings for class (or reg) tokens.
-            reg_tokens: Number of register tokens.
-            fc_norm: Pre head norm after pool (instead of before), if None, enabled when global_pool == 'avg'.
-            drop_rate: Head dropout rate.
-            pos_drop_rate: Position embedding dropout rate.
-            attn_drop_rate: Attention dropout rate.
-            drop_path_rate: Stochastic depth rate.
-            weight_init: Weight initialization scheme.
-            embed_layer: Patch embedding layer.
-            norm_layer: Normalization layer.
-            act_layer: MLP activation layer.
-            block_fn: Transformer block layer.
-        """
+
         super().__init__()
         assert global_pool in ("", "avg", "token", "map")
         assert class_token or global_pool != "token"
@@ -371,6 +409,10 @@ class VisionTransformer(nn.Module):
         if dynamic_img_size:
             # flatten deferred until after pos embed
             embed_args.update(dict(strict_img_size=False, output_fmt="NHWC"))
+
+        if not dynamic_img_size:
+            embed_args['strict_img_size'] = strict_img_size
+
         self.patch_embed = embed_layer(
             img_size=img_size,
             patch_size=patch_size,
@@ -378,7 +420,6 @@ class VisionTransformer(nn.Module):
             embed_dim=embed_dim,
             bias=not pre_norm,  # disable bias if pre-norm is used (e.g. CLIP)
             dynamic_img_pad=dynamic_img_pad,
-            strict_img_size=strict_img_size,
             **embed_args,
         )
         num_patches = self.patch_embed.num_patches
@@ -659,23 +700,6 @@ class SigLIPVisionCfg:
     use_checkpoint: bool = False
 
 
-
-# image_size：输入图像的标准大小或分辨率，单位是像素。例如384表示图像大约为384×384像素。
-
-# patch_size：Vision Transformer中将图像划分为的小块(patch)的边长大小，单位像素。比如14表示将图像划分成14×14像素的patch。
-
-# width：模型中隐藏层（embedding）的维度，即Transformer的特征向量长度，比如1152维。
-
-# layers：Transformer编码器中的总层数，表示模型深度，比如27层。
-
-# heads：多头注意力机制中的头数，决定了模型注意力计算的粒度和表达能力。
-
-# mlp_ratio：MLP（全连接前馈层）隐藏层维度与embedding维度的比例，控制MLP的规模。
-
-# global_pool：最后一层特征池化方式，map一般代表保持空间map形式或用空间注意力池化。
-
-# use_checkpoint：是否启用梯度检查点(trading compute for memory)，用于节省显存，在训练时是否调用此技术。
-
 SigLIP_MODEL_CONFIG = {
     "siglip_so400m_patch14_384": {
         "image_size": 384,
@@ -719,44 +743,6 @@ SigLIP_MODEL_CONFIG = {
     },
 }
 
-def resize_evaclip_pos_embed(model: VisionTransformer, interpolation: str = 'bicubic'):
-    # interpolate position embedding
-    orig_size = 24
-    new_size = 128
-    pos_tokens = model.pos_embed
-    pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, model.embed_dim).permute(0, 3, 1, 2)
-    pos_tokens = torch.nn.functional.interpolate(
-        pos_tokens, size=(new_size, new_size), mode=interpolation, align_corners=False)
-    pos_tokens = pos_tokens.permute(0, 2, 3, 1).flatten(1, 2)
-    model.pos_embed = nn.Parameter(pos_tokens, requires_grad=True)
-    return model 
-
-
-
-# create_siglip_vit 是一个工厂函数，用户只需传入模型名称、权重路径等参数，函数负责从配置加载对应模型架构，
-# 自动加载预训练权重，
-# 最后返回完整的SigLIP Vision Transformer编码器实例，方便后续集成和调用。
-
-# create_siglip_vit 函数的核心作用是：
-
-# 依据你传入的 model_name 参数，从 SigLIP_MODEL_CONFIG 配置字典中读取对应的模型结构参数（例如图像大小、patch大小、模型宽度、层数、注意力头数等）；
-
-# 利用读取的参数构造一个 VisionTransformer 实例，这个ViT是SigLIP视觉编码器的核心骨干，设计上支持较大尺寸（这里固定了 2048 作为输入尺寸，兼容更高分辨率图像）；
-
-# 然后从指定路径 path 中加载预训练权重，如果本地没有该权重，就自动从 Hugging Face 的公开仓库下载权重文件；
-
-# 最后加载权重到模型中，若开启了 gradient_checkpointing，还会启用显存友好的梯度检查点功能；
-
-# 返回完整加载好的视觉编码器模型实例。
-
-# 这个过程将预先设计好的模型配置和权重封装到一个便捷的函数里，方便后续调用、实验和微调。
-
-# 它基于 THUdyh/Oryx-ViT 这个预训练模型库和配置文件，通过SigLIP定制的配置选项实现不同模型变体。
-
-# 总结：你通过这个函数就能获得一个根据SigLIP配置、加载了预训练权重的、高度可配置的视觉Transformer编码器模型，方便直接用于大规模多模态视觉-语言任务。是的，这个create_siglip_vit函数的核心作用就是基于你传入的model_name（比如siglip_so400m_patch14_384）从SigLIP_MODEL_CONFIG字典读取对应的配置参数，然后用这些参数实例化一个VisionTransformer，即SigLIP视觉Transformer编码器架构。
-
-# 之后，它会根据传入的权重路径path加载预训练好的模型权重，若本地路径不存在，则自动从Hugging Face公开库下载权重。最后返回这个加载了权重、可用于训练或推理的视觉编码器模型实例。
-
 def create_siglip_vit(
     model_name: str = "siglip_so400m_patch14_384",
     image_size: int = 384,
@@ -786,6 +772,7 @@ def create_siglip_vit(
         class_token=vision_cfg.class_token,
         global_pool=vision_cfg.global_pool,
         dynamic_img_pad=False,
+        dynamic_img_size=True,
         strict_img_size=False,
         ignore_head=kwargs.get("ignore_head", False),
         weight_init=kwargs.get("weight_init", "skip"),
@@ -800,10 +787,7 @@ def create_siglip_vit(
         path = snapshot_download(repo_id="THUdyh/Oryx-ViT")
         ckpt = os.path.join(path, "oryx_vit.pth")
 
-    print('loading vision backbone from.....................................................', ckpt)
-
     state_dict = torch.load(ckpt, map_location="cpu")
-
     msg = model.load_state_dict(state_dict, strict=False)
     print(msg)
 
@@ -825,12 +809,16 @@ class OryxViTWrapper(nn.Module):
         self.vision_tower_name = vision_tower
         self.args = args
         self.path = path
-
         self.select_layer = -1
         if self.select_layer < -1: self.select_layer += 1
         self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
-
         self.output_dim = 1152
+        self._num_layers = 27  # 总层数 L
+        self.target_embed_dim = self.output_dim
+        self.patch_size = 16
+        self.target_grid_size = 384 // self.patch_size # 24
+        self.target_N = self.target_grid_size * self.target_grid_size # 576
+        self.interaction_indexes = [23, 24, 25, 26]
 
         if not delay_load:
             self.load_model()
@@ -839,57 +827,85 @@ class OryxViTWrapper(nn.Module):
             print(f"The checkpoint seems to contain `vision_tower` weights: `unfreeze_mm_vision_tower`: True.")
             self.load_model()
 
-# 加载视觉编码器及图像预处理器（CLIPImageProcessor，做图像预处理，均值和标准差设为0.5）。
-# 调用外部函数create_siglip_vit实例化视觉编码器模型，加载指定路径的预训练权重。
-# 将视觉编码器参数设置为不可训练（冻结权重），设置模型为eval模式。
-# 标记该模型已加载。
 
     def load_model(self, device_map=None):
         if self.is_loaded:
             print('{} is already loaded, `load_model` called again, skipping.'.format(self.vision_tower_name))
             return
-        local_processor_path = "/home/huangwei/openai/clip-vit-large-patch14"
+        local_processor_path = "/mnt/openai/clip-vit-large-patch14"
         #self.image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14")
         self.image_processor = CLIPImageProcessor.from_pretrained(local_processor_path)
         self.image_processor.image_mean = [0.5, 0.5, 0.5]
         self.image_processor.image_std = [0.5, 0.5, 0.5]
         print("Loading vision model...")
 
-        self.vision_tower = create_siglip_vit(path=self.path, model_name='siglip_so400m_patch16_384',
-                                                gradient_checkpointing=False)
+        self.vision_tower = create_siglip_vit(path=self.path, image_size = 384,  model_name='siglip_so400m_patch16_384',
+                                                gradient_checkpointing=False)  #默认就是这个大小
+        
+        assert hasattr(self.vision_tower, 'get_intermediate_layers'), "Vision tower must implement get_intermediate_layers."
         for p in self.vision_tower.parameters():
             p.requires_grad = False
         self.vision_tower.eval()
         self.is_loaded = True
 
-# 控制模型训练状态。
-
-# 如果视觉编码器已加载，则确保视觉编码器处于eval模式（不参与训练），这里目的是冻结视觉编码器权重，防止训练意外修改权重。
-
     def train(self, mode = True):
         self.training = mode
-
         if self.is_loaded:
             self.vision_tower.eval()
 
-
-
     def forward_func(self, images, force_fix_size=False, cal_attn_pool=False):
         if type(images) is list:
-            xs = [x.to(self.dtype) for x in images]
-            image_features, img_size, cls_token = self.vision_tower(xs, cal_attn_pool=cal_attn_pool)
-            image_features = [x.to(images[0].dtype) for x in image_features]
-        
-        else:
-            image_forward_outs, img_size, cls_token = self.vision_tower(images.to(self.dtype), cal_attn_pool=cal_attn_pool)
-            image_features = image_forward_outs.to(images.dtype)
-           
-        return image_features, img_size, cls_token
-    
+             # 如果输入是列表，使用 VisionTransformer 的 forward_features_list 方法
+             # 此时无法提取中间层，所以保持原逻辑返回最后一层特征
+             raise NotImplementedError("List input not yet fully supported for multi-layer extraction.")
+        # 1. 提取指定的中间层特征
+        # 由于 SigLIP 模型（VisionTransformer）没有 CLS Token，我们不需要 return_prefix_tokens=True
+        # outputs 是一个包含 [B, T_raw, D] 特征张量的元组 (tuple)
+        all_layer_outputs = self.vision_tower.get_intermediate_layers(
+            images.to(self.dtype), 
+            n=self.interaction_indexes, 
+            reshape=False, # 不需要 reshape 成 4D
+            return_prefix_tokens=False, # SigLIP 配置中 class_token=False
+            norm=False
+        )
+        aligned_layers = []
+        # 2. 遍历并对齐中间层特征
+        for i, feat in enumerate(all_layer_outputs):
+            # feat shape: [B, T_raw, D]
+            B, T_raw, D = feat.shape
+            
+            # SigLIP 模型的 D 恒定为 self.target_embed_dim=1152，跳过投影
+
+            # 序列长度对齐/插值
+            if T_raw != self.target_N:
+                # 1D 线性插值：[B, T_raw, D] -> [B, D, T_raw] -> [B, D, target_N] -> [B, target_N, D]
+                feat_interp = F.interpolate(
+                    feat.permute(0, 2, 1),  # [B, D, T_raw]
+                    size=self.target_N,
+                    mode="linear",
+                    align_corners=False
+                ).permute(0, 2, 1).contiguous()  # [B, target_N, D]
+                feat_proj = feat_interp
+            else:
+                feat_proj = feat 
+                
+            aligned_layers.append(feat_proj.to(images.dtype))  # [B, target_N, D]    
+        # 3. 结果返回
+        last_layer_features = aligned_layers[-1] # 最后一层对齐特征
+        all_intermidiate_features = torch.cat(aligned_layers, dim=1) # 所有层级对齐特征的拼接
+        image_size = (self.target_grid_size, self.target_grid_size)
+        # 返回 (最后一层特征, 所有层拼接特征)
+        return last_layer_features, all_intermidiate_features, image_size
+            
+
     def forward(self, images, cal_attn_pool=False):
         with torch.no_grad():
-            image_features, img_size, cls_token = self.forward_func(images, cal_attn_pool=cal_attn_pool)
-            return image_features, img_size
+            last_layer_features, all_intermidiate_features, image_size = self.forward_func(images, cal_attn_pool=cal_attn_pool)
+
+        # 返回逻辑与 DinoVisionTower 相似
+        #print("last_layer_features......................",last_layer_features.shape)
+        #print("all_intermidiate_features......................",all_intermidiate_features.shape)
+        return last_layer_features, image_size, all_intermidiate_features
 
     @property
     def dummy_feature(self):
