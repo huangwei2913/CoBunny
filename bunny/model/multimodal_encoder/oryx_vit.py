@@ -835,7 +835,7 @@ class OryxViTWrapper(nn.Module):
         self.image_processor = CLIPImageProcessor.from_pretrained(local_processor_path)
         self.image_processor.image_mean = [0.5, 0.5, 0.5]
         self.image_processor.image_std = [0.5, 0.5, 0.5]
-        print("Loading vision model...")
+        #print("Loading vision model...")
 
         self.vision_tower = create_siglip_vit(path=self.path, image_size = 384,  model_name='siglip_so400m_patch16_384',
                                                 gradient_checkpointing=False)  #默认就是这个大小

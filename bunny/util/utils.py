@@ -132,55 +132,6 @@ def pretty_print_semaphore(semaphore):
     return f"Semaphore(value={semaphore._value}, locked={semaphore.locked()})"
 
 
-def gcd(a, b):
-    while b:
-        a, b = b, a % b
-    return a
-
-def lcm(a, b):
-    return abs(a * b) // gcd(a, b)
-
-def list_lcm(numbers):
-    from functools import reduce
-    return reduce(lcm, numbers)
-
-class ImageProcessorMultipleEncoders:
-    def __init__(self, patch_size_list, max_size=1152, min_no_scale=384):
-        self.patch_size_list = patch_size_list
-        self.max_size = max_size
-        self.min_no_scale = min_no_scale
-        self.patch_lcm = list_lcm(patch_size_list)
-
-    def process_image(self, image: Image.Image) -> Image.Image:
-        # image is PIL.Image.Image
-        W, H = image.size
-
-        # 小于最小阈值，直接返回
-        if H <= self.min_no_scale and W <= self.min_no_scale:
-            return image
-
-        # 384 ~ 1152 范围内保持不变
-        if self.min_no_scale < H <= self.max_size and self.min_no_scale < W <= self.max_size:
-            return image
-
-        # 大于1152，重采样到不超过1152且为patch_lcm的最大倍数
-        if H > self.max_size or W > self.max_size:
-            new_H = (self.max_size // self.patch_lcm) * self.patch_lcm
-            new_W = (self.max_size // self.patch_lcm) * self.patch_lcm
-            image = image.resize((new_W, new_H), Image.BILINEAR)
-            return image
-
-        # 小于384但不满足最小公倍数倍数条件的，调整尺寸
-        if H % self.patch_lcm != 0 or W % self.patch_lcm != 0:
-            new_H = (H // self.patch_lcm) * self.patch_lcm
-            new_W = (W // self.patch_lcm) * self.patch_lcm
-            if new_H < 1: new_H = self.patch_lcm
-            if new_W < 1: new_W = self.patch_lcm
-            image = image.resize((new_W, new_H), Image.BILINEAR)
-
-        return image
-    
-
 #使用cross Atttention模块
 class CrossAttention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):

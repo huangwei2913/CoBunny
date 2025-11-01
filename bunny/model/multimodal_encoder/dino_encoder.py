@@ -138,7 +138,7 @@ class DinoVisionTower(BaseVisionTower):
                         feat, cls = layer_out
                         feat = feat.to(images.dtype)
                         cls =  cls.to(images.dtype)
-                        print(f"Layer {i} feat shape: {feat.shape}, cls shape: {cls.shape}, dtype: {feat.dtype}")
+                        #print(f"Layer {i} feat shape: {feat.shape}, cls shape: {cls.shape}, dtype: {feat.dtype}")
                     else:
                         feat, cls = layer_out, None
                         feat = feat.to(images.dtype)
@@ -185,8 +185,8 @@ class DinoVisionTower(BaseVisionTower):
                     aligned_layers.append(feat_proj.to(images.dtype) )  # [B, target_N, D]
 
                 allintermidieaidfeatures = torch.cat(aligned_layers, dim=1)  
-                print(f" all patch features whoese output shape is ......................: {allintermidieaidfeatures.shape}, dtype: {allintermidieaidfeatures.dtype}")
-                print(f" aligned_layers[-1] output shape is ......................: {aligned_layers[-1].shape}, dtype: {aligned_layers[-1].dtype}")
+                #print(f" all patch features whoese output shape is ......................: {allintermidieaidfeatures.shape}, dtype: {allintermidieaidfeatures.dtype}")
+                #print(f" aligned_layers[-1] output shape is ......................: {aligned_layers[-1].shape}, dtype: {aligned_layers[-1].dtype}")
                 if self._num_patches_cached is None:
                     seq_len = aligned_layers[-1].shape[1]
                     self._num_patches_cached = seq_len - 1  # 一个图像被分解出的 patch 数量，不包括 CLS

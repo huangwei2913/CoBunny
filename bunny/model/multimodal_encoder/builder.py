@@ -7,6 +7,7 @@ from .dino_encoder import DinoVisionTower
 from .midas_encoder import MiDaSVisionTower
 import logging
 from .oryx_vit import OryxViTWrapper
+from .AdaptiveConcatenationVisionTower import AdaptiveConcatenationVisionTower
 
 #要明确知道每一个视觉编码器的输出
 def build_vision_tower(vision_tower_cfg, **kwargs):
@@ -18,12 +19,15 @@ def build_vision_tower(vision_tower_cfg, **kwargs):
             return SiglipVisionTowerS2(vision_tower, args=vision_tower_cfg, **kwargs)
         else:
             return SiglipVisionTowerS2(vision_tower, args=vision_tower_cfg, **kwargs)
+        
     elif 'eva' in vision_tower.lower():
         if use_s2:
             raise ValueError(f'Currently not supporting S2 for EVA-CLIP')
         else:
             return EvaClipVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
 
+    elif 'mixedencoder' in vision_tower.lower():
+        return AdaptiveConcatenationVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
 
     elif "midas" in vision_tower.lower():
         logging.info(f"Loading **midas: {vision_tower}")
