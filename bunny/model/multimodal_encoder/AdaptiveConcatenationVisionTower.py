@@ -170,9 +170,9 @@ class AdaptiveConcatenationVisionTower(nn.Module):
          #假定只有两个视觉编码器，dinov3在前
         #self.input_image_size = 1024 # hardcode  多视觉编码器通常预期输入大小不一致（例如CLIP是336×336，ConvNeXt是224×224或者更大），
         #为了在多编码器融合时保证输入图像处理的一致性和特征空间匹配，这里在这个融合模块层面统一固定为 1024
-        self.load_vision_towers(vision_tower_name_list, args)
         self.num_heads  = 8   # 多头自注意力
         self.mlp_ratio = 2.0   # MLP隐藏层大小是输入的4倍
+        self.load_vision_towers(vision_tower_name_list, args)
         self.cross_attn_block = CrossAttentionBlock(dim=self.global_dimension, num_heads=self.num_heads, mlp_ratio=self.mlp_ratio)
         self.image_processor = SingleImageProcessor(
             mean=IMAGENET_DEFAULT_MEAN, 
@@ -208,23 +208,43 @@ class AdaptiveConcatenationVisionTower(nn.Module):
                     nn.Linear(1152, 2048),
                     nn.ReLU(),
                     nn.Linear(2048, self.global_dimension)
-            ))      
+            ))
+            self.num_dino_layers = len(self.dino_vision_tower.interaction_indexes) # N_A，例如 4
+            self.dino_cls_attn_weights = nn.Parameter(torch.ones(self.num_dino_layers))  #
+            self.multi_cls_cross_attn_blocks = nn.ModuleList([
+                    CrossAttentionBlock(dim=self.global_dimension, num_heads=self.num_heads, mlp_ratio=self.mlp_ratio)
+                    for _ in range(self.num_dino_layers)
+                ])
+
         else:
-            return         
+            return 
+                
     def load_model(self):
         assert self.is_loaded, "All the vision encoders should be loaded during initialization!"
+    
     def forward(self, x):
         #将输入图像预处理到一个既能兼容所有模型patch_size的大小，又不超过各模型支持的最大输入尺寸的公共尺寸
         patch_size_list = list(dict.fromkeys(self.patch_size_list))  #去除重复
         processor_ = ImageProcessorMultipleEncoders(patch_size_list, image_size=self.target_image_size)
         processed_img = processor_.process_image(x) #转换后的影像大小
         #从第dinov3视觉编码器获取特征
+
+
         A_last_layer, A_intermediate_tokens = self.dino_vision_tower(processed_img) # A_intermediate_tokens: [B, N_A*(1+T_target), C_A]
         A_tokens_proj = self.mlp_layers[0](A_intermediate_tokens) # [B, N_A*(1+T_target), D_target]
         # OryxViT (B)
         B_last_layer,  _ , B_intermeidate_tokens = self.oryx_vision_tower(processed_img) # B_intermeidate_tokens: [B, N_B*T_target, C_B]
         B_tokens_proj = self.mlp_layers[1](B_intermeidate_tokens) # [B, N_B*T_target, D_target]
         
+        N_A = len(self.dino_vision_tower.interaction_indexes)  # 总共有师曾
+        T_target = self.dino_vision_tower.target_N
+
+        A_layers_full = A_tokens_proj.view(
+            A_tokens_proj.shape[0], N_A, (1 + T_target), self.global_dimension
+        )
+
+        all_dino_cls_tokens = A_layers_full[:, :, 0:1, :]
+
         B_len = B_tokens_proj.shape[1]
         target_B_len = B_len // 4 # 576
         B_tokens_proj_compressed = bipartite_soft_matching_merge(
@@ -233,10 +253,27 @@ class AdaptiveConcatenationVisionTower(nn.Module):
                     B_tokens_proj, 
                     mode="mean" # 或其他合适的模式
         )
+        enhanced_cls_tokens_list = []
+        for i in range(N_A):
+            # Q: 当前层的 CLS Token [B, 1, D]
+            current_cls = all_dino_cls_tokens[:, i, :, :]
+            
+            # K/V: 压缩后的 Oryx Tokens
+            # 将 CLS 与压缩后的 B 塔特征拼接作为 Attention 输入
+            x_for_cross_attn = torch.cat([current_cls, B_tokens_proj_compressed], dim=1)
+            
+            # 使用对应层的 CrossAttentionBlock
+            # enhanced_cls: [B, 1, D]
+            enhanced_cls = self.multi_cls_cross_attn_blocks[i](x_for_cross_attn)
+            enhanced_cls_tokens_list.append(enhanced_cls)
 
-        dino_cls_token_raw = _get_cls_token(A_last_layer) # [B, 1, 768]        
-        dino_cls_token_proj = self.mlp_layers[0](dino_cls_token_raw) # [B, 1, D_target]
-        x_for_cross_attn = torch.cat([dino_cls_token_proj, B_tokens_proj_compressed], dim=1) # [B, 1 + 576, D]
+        stacked_enhanced_cls = torch.cat(enhanced_cls_tokens_list, dim=1)
+        weights = F.softmax(self.dino_cls_attn_weights, dim=0)
+        weights = weights.view(1, N_A, 1, 1)
+        enhanced_cls_token = torch.sum(stacked_enhanced_cls * weights, dim=1)
+        #dino_cls_token_raw = _get_cls_token(A_last_layer) # [B, 1, 768]        
+        #dino_cls_token_proj = self.mlp_layers[0](dino_cls_token_raw) # [B, 1, D_target]
+        x_for_cross_attn = torch.cat([enhanced_cls_token, B_tokens_proj_compressed], dim=1) # [B, 1 + 576, D]
         enhanced_cls_token = self.cross_attn_block(x_for_cross_attn)
         #x_for_cross_attn = torch.cat([dino_cls_token_proj, B_tokens_proj], dim=1)
         #enhanced_cls_token = self.cross_attn_block(x_for_cross_attn)
@@ -267,10 +304,10 @@ class AdaptiveConcatenationVisionTower(nn.Module):
         B_lower_group = B_layers[:, B_half:].flatten(1, 2)
         r_A = A_upper_group.shape[1] // 2 # 合并 50% 的 tokens
         r_B = B_upper_group.shape[1] // 2
-        A_upper_merged = linear_to_2d_pooling(A_upper_group, layers=A_half, token_per_layer=T_target)
-        A_lower_merged = linear_to_2d_pooling(A_lower_group, layers=A_half, token_per_layer=T_target)
-        B_upper_merged = linear_to_2d_pooling(B_upper_group, layers=B_half, token_per_layer=T_target_B)
-        B_lower_merged = linear_to_2d_pooling(B_lower_group, layers=B_half, token_per_layer=T_target_B)
+        A_upper_merged = bipartite_soft_matching_merge(A_upper_group, r_A, A_upper_group, mode="mean")
+        A_lower_merged = bipartite_soft_matching_merge(A_lower_group, r_A, A_lower_group, mode="mean")
+        B_upper_merged = bipartite_soft_matching_merge(B_upper_group, r_B, B_upper_group, mode="mean")
+        B_lower_merged = bipartite_soft_matching_merge(B_lower_group, r_B, B_lower_group, mode="mean")
         #采用的策略不同
         final_upper_tokens = torch.cat([A_upper_merged, B_upper_merged], dim=1)
         final_lower_tokens = torch.cat([A_lower_merged, B_lower_merged], dim=1)
@@ -294,8 +331,6 @@ class AdaptiveConcatenationVisionTower(nn.Module):
 
         T_target = self.dino_vision_tower.target_N
         T_target_B = self.oryx_vision_tower.target_N
-        N_A = len(self.dino_vision_tower.interaction_indexes)
-        N_B = len(self.oryx_vision_tower.interaction_indexes)
         N_A = len(self.dino_vision_tower.interaction_indexes)
         N_B = len(self.oryx_vision_tower.interaction_indexes)
         # Tokens 压缩了 50%
