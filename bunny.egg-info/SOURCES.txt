@@ -1,6 +1,8 @@
 LICENSE
 README.md
 pyproject.toml
+GQAVal/eval.py
+SEED-Bench/SEED-Bench.py
 bunny/constants.py
 bunny/conversation.py
 bunny.egg-info/PKG-INFO
@@ -8,13 +10,18 @@ bunny.egg-info/SOURCES.txt
 bunny.egg-info/dependency_links.txt
 bunny.egg-info/requires.txt
 bunny.egg-info/top_level.txt
+bunny/eval/configuration_bunny_phi.py
 bunny/eval/m4c_evaluator.py
 bunny/eval/model_vqa.py
 bunny/eval/model_vqa_cmmmu.py
 bunny/eval/model_vqa_loader.py
+bunny/eval/model_vqa_loader_gqa.py
+bunny/eval/model_vqa_loader_mme.py
 bunny/eval/model_vqa_mmbench.py
 bunny/eval/model_vqa_mmmu.py
 bunny/eval/model_vqa_science.py
+bunny/eval/modeling_bunny_phi.py
+bunny/eval/modeling_bunny_phi_mme.py
 bunny/model/__init__.py
 bunny/model/builder.py
 bunny/model/bunny_arch.py
@@ -134,6 +141,7 @@ dinov3/utils/utils.py
 eval/cmmmu/eval_script.py
 eval/cmmmu/eval_utils.py
 eval/gqa/convert_gqa_for_eval.py
+eval/gqa/convert_gqa_to_bunny_input.py
 eval/gqa/eval_gqa.py
 eval/mm-vet/convert_mmvet_for_eval.py
 eval/mmbench/convert_mmbench_for_submission.py
@@ -146,7 +154,10 @@ eval/seed-bench/convert_seed_for_submission.py
 eval/seed-bench/extract_video_frames.py
 eval/textvqa/eval_textvqa.py
 eval/viswiz/convert_viswiz_for_submission.py
+eval/vqav2/VQAv2.py
+eval/vqav2/convert_json_to_jsonl.py
 eval/vqav2/convert_vqav2_for_submission.py
+eval/vqav2/vqav2_builder.py
 script/batch_inference.py
 script/merge_lora_weights.py
 unik3d/__init__.py

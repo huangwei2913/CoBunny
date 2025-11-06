@@ -2,8 +2,10 @@ build/
 data/
 bunny/checkpoints-pretrain
 checkpoints-pretrain/
-eval/
+/eval/
 bunny/__pycache__
 **/__pycache__/
-
+GQAVal/
+MMMU/
+SEED-Bench/
 

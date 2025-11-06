@@ -8,8 +8,8 @@ export MASTER_PORT=12345
 MODEL_TYPE=phi-2
 TARGET_DIR=bunny-phi-2
 #在这里我们先用训练好的模型来看下效果
-python -m bunny.eval.model_vqa_loader \
-    --model-path /home/huangwei/Bunny-v1_0-3B \
+python -m bunny.eval.model_vqa_loader_mme \
+    --model-path /mnt/Bunny-v1_0-3B \
     --model-type $MODEL_TYPE \
     --image-folder ./eval/mme/MME_Benchmark_release_version/MME_Benchmark \
     --question-file ./eval/mme/bunny_mme.jsonl \

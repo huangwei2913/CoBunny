@@ -36,11 +36,40 @@ class CustomDataset(Dataset):
         self.model = model
         self.model_config = model_config
 
+ # 文件: /mnt/CoBunny/bunny/eval/model_vqa_loader.py (在 CustomDataset 类中)
+
     def __getitem__(self, index):
         line = self.questions[index]
-        image_file = line["image"]
+        print("__getitem__.................",line)
+
+        # 1. 提取图像ID和问题文本
+        image_id = line["image_id"]
         qs = line["text"]
 
+        # 2. 构造图像文件名 (解决 TypeError 问题)
+        # 错误发生的原因是 image_id 是 int，os.path.join 不能处理 int。
+        # 假设 COCO VQA 格式: 12 位零填充的 ID + .jpg 后缀。
+        try:
+            if isinstance(image_id, int):
+                # 构造的文件名会是 "000000163845.jpg" (12位零填充)
+                image_file ="COCO_test2015_"
+                image_file1 = f"{image_id:012d}.jpg" 
+                image_file ="COCO_test2015_" +image_file1
+                
+            elif isinstance(image_id, str):
+                # 如果 image_id 已经是字符串，确保它有 .jpg 后缀
+                image_file = image_id if image_id.endswith('.jpg') else image_id + '.jpg'
+            else:
+                # 极端情况处理
+                raise TypeError(f"Unexpected type for image_id: {type(image_id)}")
+        except Exception as e:
+            # 兜底捕获格式化错误，以防 image_id 无法格式化
+            print(f"Error formatting image_id {image_id}: {e}")
+            # 尝试回退到 JSONL 中的 'image' 键（如果存在）
+            image_file = line.get("image", str(image_id) + ".jpg") 
+            
+
+        # 3. 构造提示词 (Prompt)
         qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
 
         conv = conv_templates[args.conv_mode].copy()
@@ -48,8 +77,11 @@ class CustomDataset(Dataset):
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
+        # 4. 加载图像
+        # os.path.join 此时 image_file 已经是字符串，不会报错
         image = Image.open(os.path.join(self.image_folder, image_file)).convert('RGB')
-        #image_tensor = process_images([image], self.image_processor, self.model_config)[0]
+
+        # 5. 处理图像和 tokenization
         image_tensor = self.model.process_images([image], self.model_config)[0]
         input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
 
@@ -83,15 +115,29 @@ def eval_model(args):
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     model = BunnyPhiForCausalLM.from_pretrained(
-        "/home/huangwei/Bunny-v1_0-3B",
+        "/mnt/Bunny-v1_0-3B",
         low_cpu_mem_usage=True,
         tp_plan=None,
         use_safetensors=True,
         local_files_only=True,
     )
-
+    model = model.cuda()
     #from transformers import AutoImageProcessor
+    language_model = model.get_model() # 获取语言模型核心 (PhiForCausalLM)
 
+    if hasattr(language_model, 'mm_projector') and language_model.mm_projector is not None:
+        print("Forcibly moving all mm_projector parameters to CUDA...")
+        
+        # 递归地将所有子模块的参数移动到 CUDA
+        for name, module in language_model.mm_projector.named_modules():
+            if hasattr(module, 'weight'):
+                module.weight.data = module.weight.data.to('cuda:0')
+                if module.weight.grad is not None:
+                    module.weight.grad.data = module.weight.grad.data.to('cuda:0')
+            if hasattr(module, 'bias') and module.bias is not None:
+                module.bias.data = module.bias.data.to('cuda:0')
+                if module.bias.grad is not None:
+                    module.bias.grad.data = module.bias.grad.data.to('cuda:0')
     #image_processor = AutoImageProcessor.from_pretrained(model_path, local_files_only=True)
 
     questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")]

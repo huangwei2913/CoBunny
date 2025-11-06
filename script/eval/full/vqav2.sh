@@ -12,10 +12,10 @@ SPLIT="bunny_vqav2_mscoco_test-dev2015"
 
 for IDX in $(seq 0 $((CHUNKS-1))); do
     CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m bunny.eval.model_vqa_loader \
-        --model-path ./checkpoints-$MODEL_TYPE/$TARGET_DIR \
+        --model-path /mnt/Bunny-v1_0-3B \
         --model-type $MODEL_TYPE \
-        --question-file ./eval/vqav2/$SPLIT.jsonl \
-        --image-folder ./eval/vqav2/test2015 \
+        --question-file /mnt/CoBunny/eval/vqav2/$SPLIT.jsonl \
+        --image-folder /mnt/CoBunny/eval/vqav2/test2015 \
         --answers-file ./eval/vqav2/answers/$SPLIT/$TARGET_DIR/${CHUNKS}_${IDX}.jsonl \
         --num-chunks $CHUNKS \
         --chunk-idx $IDX \

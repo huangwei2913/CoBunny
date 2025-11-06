@@ -77,6 +77,7 @@ class DinoVisionTower(BaseVisionTower):
         self.target_N = self.target_grid_size * self.target_grid_size
 
         self.pretrained_path =  "/mnt/facebook/dinov3-convnext-large-pretrain-lvd1689m"   
+        self.cfg_only = AutoConfig.from_pretrained(self.vision_tower_name)  #直接用modelscope里面的配置
         if not self.delay_load:
             self.load_model()
         else:

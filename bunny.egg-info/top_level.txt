@@ -1,5 +1,9 @@
+GQAVal
+MMMU
+SEED-Bench
 build
 bunny
+checkpoints-phi-3
 checkpoints-pretrain
 dinov3
 eval

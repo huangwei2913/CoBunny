@@ -8,14 +8,14 @@ CHUNKS=${#GPULIST[@]}
 MODEL_TYPE=phi-2
 TARGET_DIR=bunny-phi-2
 
-SPLIT="bunny_gqa_testdev_balanced"
+SPLIT="bunny_gqa_testdev_all"
 
 for IDX in $(seq 0 $((CHUNKS-1))); do
-    CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m bunny.eval.model_vqa_loader \
-        --model-path ./checkpoints-$MODEL_TYPE/$TARGET_DIR \
+    CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python -m bunny.eval.model_vqa_loader_gqa \
+        --model-path /mnt/Bunny-v1_0-3B \
         --model-type $MODEL_TYPE \
-        --question-file ./eval/gqa/$SPLIT.jsonl \
-        --image-folder ./eval/gqa/images \
+        --question-file /mnt/CoBunny/eval/gqa/bunny_gqa_testdev_all.jsonl\
+        --image-folder /mnt/CoBunny/GQAVal/images \
         --answers-file ./eval/gqa/answers/$SPLIT/$TARGET_DIR/${CHUNKS}_${IDX}.jsonl \
         --num-chunks $CHUNKS \
         --chunk-idx $IDX \
