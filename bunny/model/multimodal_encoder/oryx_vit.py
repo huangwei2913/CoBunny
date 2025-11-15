@@ -855,7 +855,8 @@ class OryxViTWrapper(nn.Module):
         if type(images) is list:
              # 如果输入是列表，使用 VisionTransformer 的 forward_features_list 方法
              # 此时无法提取中间层，所以保持原逻辑返回最后一层特征
-             raise NotImplementedError("List input not yet fully supported for multi-layer extraction.")
+             images = torch.cat(images, dim=0)
+             #raise NotImplementedError("List input not yet fully supported for multi-layer extraction.")
         # 1. 提取指定的中间层特征
         # 由于 SigLIP 模型（VisionTransformer）没有 CLS Token，我们不需要 return_prefix_tokens=True
         # outputs 是一个包含 [B, T_raw, D] 特征张量的元组 (tuple)

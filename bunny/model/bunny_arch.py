@@ -69,6 +69,7 @@ class BunnyMetaModel:
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
             incompatible_keys = self.vision_resampler.load_state_dict(get_w(mm_projector_weights, 'vision_resampler'), strict=False)
             print(incompatible_keys)
+
 class BunnyMetaForCausalLM(ABC):
     @abstractmethod
     def get_model(self):
@@ -109,11 +110,14 @@ class BunnyMetaForCausalLM(ABC):
                 )), dim=1)
                 position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
+        #images 是一个包含多张图像的 List (每个元素是 $B \times C \times H \times W$)
+        #5D 张量 (视频格式 $B \times T \times C \times H \times W$)，则判断为多帧输入 
         if type(images) is list or images.ndim == 5:
             concat_images = torch.cat([image for image in images], dim=0)
-            image_features = self.encode_images(concat_images)
+            image_features = self.encode_images(concat_images) 
             split_sizes = [image.shape[0] for image in images]
             image_features = torch.split(image_features, split_sizes, dim=0)
+            #编码完成后，它将返回的特征拆分回原来每张图像的特征 List  
             image_features = [x.flatten(0, 1).to(self.device) for x in image_features]
         else:
             image_features  = self.encode_images(images).to(self.device)   #这个地方可能是不需要的
