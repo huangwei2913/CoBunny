@@ -18,11 +18,11 @@ deepspeed bunny/train/train.py \
     --lora_alpha 256 \
     --mm_projector_lr 2e-5 \
     --deepspeed ./script/deepspeed/zero3.json \
-    --model_name_or_path /mnt/microsoft/phi-1_5\
+    --model_name_or_path /mnt/conda_data/microsoft/phi-1_5\
     --model_type $MODEL_TYPE \
     --version phi3 \
-    --data_path /mnt/Bunny-v1.1-data/finetune/bunny_695k.json \
-    --image_folder /mnt/Bunny-v1.1-data/finetune/images \
+    --data_path /mnt/conda_data/Bunny-v1.1-data/finetune/bunny_695k.json \
+    --image_folder /mnt/conda_data/Bunny-v1.1-data/finetune/images \
     --vision_tower /mnt/siglip-so400m-patch14-384 \
     --mm_projector_type mlp2x_gelu \
     --image_aspect_ratio pad \

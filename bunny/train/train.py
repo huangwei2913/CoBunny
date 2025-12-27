@@ -14,6 +14,7 @@ from bunny import conversation as conversation_lib
 from bunny.model import *
 from bunny.util.data_utils import make_supervised_data_module, DataArguments
 
+
 local_rank = None
 
 
@@ -463,7 +464,27 @@ def train():
         conversation_lib.default_conversation = conversation_lib.conv_templates["default"]
 
     model.get_model().initialize_vision_modules(model_args=model_args)
+    # ...
+    #################### ⭐️ 插入调试代码 ⭐️ ####################
+    if model_args.pretrain_mm_mlp_adapter:
+        rank0_print("Checking mm_projector parameters after loading pretrain weights...")
 
+        # 假设 mm_projector 至少有一个权重层 (比如 weight)
+        mm_projector_first_weight = model.get_model().mm_projector.parameters().__next__()
+
+        # 尝试计算该权重的L2范数或某个统计量，证明它不是随机初始化
+        # 注意：这只在 local_rank 0 上安全，因为它需要同步
+        if training_args.local_rank == 0 or training_args.local_rank == -1:
+            try:
+                # 检查权重的范数，如果是一个加载的权重，它的值应该是非零且非极小的
+                weight_norm = torch.linalg.norm(mm_projector_first_weight).item()
+                rank0_print(f"✅ mm_projector first weight norm: {weight_norm:.4f}")
+                if weight_norm < 1.0: # 经验值，加载的权重通常不会这么小
+                    rank0_print("⚠️ Warning: Weight norm seems very small, check if weights were correctly loaded.")
+            except Exception as e:
+                rank0_print(f"❌ Error checking mm_projector weight norm: {e}")
+
+    # ... (继续后面的 vision_tower.to(...) 等代码)
     ####################应该是在这里添加视觉编码器？？？？？    
     vision_tower = model.get_vision_tower()
     #设备移动：模型必须移动到指定的训练设备（通常是GPU），否则计算无法加速。
@@ -495,9 +516,19 @@ def train():
     model.config.use_s2 = model_args.use_s2
 
     model.config.unfreeze_vision_tower = training_args.unfreeze_vision_tower = model_args.unfreeze_vision_tower
+    #if training_args.unfreeze_vision_tower:
+    #    for p in model.get_model().vision_tower.parameters():
+    #        p.requires_grad = True
+
+
     if training_args.unfreeze_vision_tower:
-        for p in model.get_model().vision_tower.parameters():
-            p.requires_grad = True
+            print("--- 🚀 尝试解冻视觉编码器参数 (Recipe-2) ---")
+            # 实际解冻逻辑
+            vision_tower = model.get_model().vision_tower
+            for name, p in vision_tower.named_parameters():
+                p.requires_grad = True
+                
+
 
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer
@@ -516,9 +547,8 @@ def train():
     #设置数据处理模块
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
-    
-    
-    
+
+
     #   返回dict(train_dataset=train_dataset,
     #            eval_dataset=None,
     #            data_collator=data_collator)

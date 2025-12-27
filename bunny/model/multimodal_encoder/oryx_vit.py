@@ -830,7 +830,7 @@ class OryxViTWrapper(nn.Module):
         if self.is_loaded:
             print('{} is already loaded, `load_model` called again, skipping.'.format(self.vision_tower_name))
             return
-        local_processor_path = "/mnt/openai/clip-vit-large-patch14"
+        local_processor_path = "/mnt/conda_data/openai/clip-vit-large-patch14"
         #self.image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14")
         self.image_processor = CLIPImageProcessor.from_pretrained(local_processor_path)
         self.image_processor.image_mean = [0.5, 0.5, 0.5]
@@ -902,8 +902,8 @@ class OryxViTWrapper(nn.Module):
             last_layer_features, all_intermidiate_features, image_size = self.forward_func(images, cal_attn_pool=cal_attn_pool)
 
         # 返回逻辑与 DinoVisionTower 相似
-        print("last_layer_features......................",last_layer_features.shape)
-        print("all_intermidiate_features......................",all_intermidiate_features.shape)
+        #print("last_layer_features......................",last_layer_features.shape)
+        #print("all_intermidiate_features......................",all_intermidiate_features.shape)
         return last_layer_features, image_size, all_intermidiate_features
 
     @property

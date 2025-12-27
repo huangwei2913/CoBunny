@@ -43,6 +43,7 @@ def load_pretrained_model(model_path, model_base, model_name, model_type, load_8
         print('Loading Bunny from base model...')
         if model_type == 'phi-1.5' or model_type == 'phi-2':
             tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=True)
+            kwargs.pop('low_cpu_mem_usage', None)
             model = BunnyPhiForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True,
                                                         config=lora_cfg_pretrained, **kwargs)
         elif model_type == 'phi-3':
@@ -195,7 +196,13 @@ def load_pretrained_model(model_path, model_base, model_name, model_type, load_8
         tokenizer.eos_token_id = 128001
         model.generation_config.pad_token_id = tokenizer.eos_token_id
 
-    if model.generation_config.pad_token_id is None:
-        model.generation_config.pad_token_id = model.generation_config.eos_token_id
+
+    if model.generation_config is not None:
+        if model.generation_config.pad_token_id is None:
+            model.generation_config.pad_token_id = tokenizer.pad_token_id
+    else:
+        from transformers import GenerationConfig
+        model.generation_config = GenerationConfig.from_model_config(model.config)
+        model.generation_config.pad_token_id = tokenizer.pad_token_id
 
     return tokenizer, model, image_processor, context_len

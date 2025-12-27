@@ -3,7 +3,7 @@ MMMU
 SEED-Bench
 build
 bunny
-checkpoints-phi-3
+checkpoints-finetune
 checkpoints-pretrain
 dinov3
 eval

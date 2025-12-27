@@ -1,0 +1,14 @@
+{
+  "zero_optimization": {
+    "stage": 2,
+    "offload_optimizer": {"device": "none"},
+    "reduce_bucket_size": 5e6,
+    "stage3_prefetch_bucket_size": 5e6,
+    "stage3_param_persistence_threshold": 1e6,
+    "gather_16bit_weights_on_model_save": true
+  },
+  "bf16": {"enabled": true},
+  "train_micro_batch_size_per_gpu": 4,
+  "gradient_accumulation_steps": 2,
+  "train_batch_size": 128
+}

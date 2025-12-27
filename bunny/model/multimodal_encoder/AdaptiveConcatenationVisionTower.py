@@ -198,6 +198,7 @@ class AdaptiveConcatenationVisionTower(nn.Module):
     def __init__(self,
                  vision_tower,
                  args,
+                 delay_load=False,
                  grid_size=32):
         super().__init__()
         self.is_loaded = False
@@ -211,13 +212,18 @@ class AdaptiveConcatenationVisionTower(nn.Module):
         self.global_dimension = 1024  #将不同编码器的全局特征维度统一到1024这个上来
         vision_tower_name_list = []
         vision_tower_name_list.append("facebook/dinov3-convnext-large-pretrain-lvd1689m")
-        vision_tower_name_list.append('oryx_vit:/mnt/THUdyhOryx-ViT/oryx_vit.pth')
+        vision_tower_name_list.append('oryx_vit:/mnt/conda_data/THUdyhOryx-ViT/oryx_vit.pth')
          #假定只有两个视觉编码器，dinov3在前
         #self.input_image_size = 1024 # hardcode  多视觉编码器通常预期输入大小不一致（例如CLIP是336×336，ConvNeXt是224×224或者更大），
         #为了在多编码器融合时保证输入图像处理的一致性和特征空间匹配，这里在这个融合模块层面统一固定为 1024
         self.num_heads  = 4   # 多头自注意力
         self.mlp_ratio = 4.0   # MLP隐藏层大小是输入的4倍
-        self.load_vision_towers(vision_tower_name_list, args)
+        if not delay_load:
+            self.load_vision_towers(vision_tower_name_list, args)
+        else:
+            self.vision_tower_name_list = vision_tower_name_list
+            self.args = args
+        #print(f"DEBUG: N_A (num_dino_layers) is.............................: {self.num_dino_layers}")
         self.cross_attn_block = CrossAttentionBlock(dim=self.global_dimension, num_heads=self.num_heads, mlp_ratio=self.mlp_ratio)
         self.image_processor = SingleImageProcessor(
             mean=IMAGENET_DEFAULT_MEAN, 
@@ -275,104 +281,120 @@ class AdaptiveConcatenationVisionTower(nn.Module):
             return 
                 
     def load_model(self):
+        # 这个函数是给外部调用的（比如在合并权重时）
+        if not self.is_loaded:
+            # 这里的 vision_tower_name_list 和 args 需要确保能访问到
+            # 建议在 __init__ 里用 self. 保存一下这两个变量
+            self.load_vision_towers(self.vision_tower_name_list, self.args)
+        
+        # 确保你的断言依然有效
         assert self.is_loaded, "All the vision encoders should be loaded during initialization!"
     
     def forward(self, x):
-        #将输入图像预处理到一个既能兼容所有模型patch_size的大小，又不超过各模型支持的最大输入尺寸的公共尺寸
         # ------------------------ 1. 图像预处理 ------------------------
-        patch_size_list = list(dict.fromkeys(self.patch_size_list))  #去除重复
+        # 将输入图像预处理到一个既能兼容所有模型patch_size的大小，又不超过各模型支持的最大输入尺寸的公共尺寸
+        patch_size_list = list(dict.fromkeys(self.patch_size_list))
         processor_ = ImageProcessorMultipleEncoders(patch_size_list, image_size=self.target_image_size)
-        processed_img = processor_.process_image(x) #转换后的影像大小
-        #从第dinov3视觉编码器获取特征
+        processed_img = processor_.process_image(x) # [B, C, H, W]
+
         # ------------------------ 2. 获取A和B塔的的最后一层和所有层特征 ------------------------
+        # A塔 (DINOv3)
         A_last_layer, A_intermediate_tokens = self.dino_vision_tower(processed_img) # A_intermediate_tokens: [B, N_A*(1+T_target), C_A]
         A_tokens_proj = self.mlp_layers[0](A_intermediate_tokens) # [B, N_A*(1+T_target), D_target]
-        # OryxViT (B)
-        B_last_layer,  _ , B_intermeidate_tokens = self.oryx_vision_tower(processed_img) # B_intermeidate_tokens: [B, N_B*T_target, C_B]
+        # B塔 (OryxViT)
+        B_last_layer, _ , B_intermeidate_tokens = self.oryx_vision_tower(processed_img) # B_intermeidate_tokens: [B, N_B*T_target, C_B]
         B_tokens_proj = self.mlp_layers[1](B_intermeidate_tokens) # [B, N_B*T_target, D_target]
+
         # ------------------------ 3.分离出A塔的所有CLS tokens------------------------
-        N_A = len(self.dino_vision_tower.interaction_indexes)  # 总共有多少层
+        N_A = len(self.dino_vision_tower.interaction_indexes)
         T_target = self.dino_vision_tower.target_N
+        # 将 Tokens 还原为 [B, N_A, 1 + T_target, D]
         A_layers_full = A_tokens_proj.view(
             A_tokens_proj.shape[0], N_A, (1 + T_target), self.global_dimension
         )
+        # 提取每一层的 CLS Token: [B, N_A, 1, D]
         all_dino_cls_tokens = A_layers_full[:, :, 0:1, :]
 
         # ------------------------ 4.压缩B塔特征与伪cls生成------------------------
         B_len = B_tokens_proj.shape[1]
-        target_B_len = B_len // 4 # 576 #zn
+        target_B_len = B_len // 4 # 576 
+        # Bipartite Matching 合并
         B_tokens_proj_compressed = bipartite_soft_matching_merge(
-                    B_tokens_proj, 
-                    target_B_len, 
-                    B_tokens_proj, 
-                    mode="mean" # 或其他合适的模式
-        )
-        #print("B_tokens_proj_compressed......................",B_tokens_proj_compressed.shape)       
-        B_pseudo_cls = self.b_pseudo_cls_head(B_tokens_proj_compressed)
-        #print("B_pseudo_cls......................",B_pseudo_cls.shape)
-        # ------------------------ 5. A-driven-B CLS 增强------------------------   
-        N_A = len(self.dino_vision_tower.interaction_indexes)
-        N_B = len(self.oryx_vision_tower.interaction_indexes)
-        #print("all_dino_cls_tokens......................",all_dino_cls_tokens.shape)
+            B_tokens_proj, target_B_len, B_tokens_proj, mode="mean"
+        ) # [B, L_B_compressed, D]
+        # 伪 CLS Token 生成
+        B_pseudo_cls = self.b_pseudo_cls_head(B_tokens_proj_compressed) # [B, 1, D]
 
+        # ------------------------ 5. A-driven-B CLS 增强 (核心修复区) ------------------------ 
         enhanced_cls_tokens_list_A_driven_B = []
         for i in range(N_A):
-            current_cls = all_dino_cls_tokens[:, i, :, :]
-            #print("current_cls......................",current_cls.shape)
+            # current_cls 形状: [B, 1, D]
+            current_cls = all_dino_cls_tokens[:, i, 0, :].unsqueeze(1) # 显式移除维度 2 的 1
             # Query: DINO CLS, K/V: B Patches Compressed
             x_for_cross_attn = torch.cat([current_cls, B_tokens_proj_compressed], dim=1)
-            enhanced_cls = self.multi_cls_cross_attn_blocks[i](x_for_cross_attn)
-            #print("inner enhanced_cls...................",enhanced_cls.shape)
-            enhanced_cls_tokens_list_A_driven_B.append(enhanced_cls)     
+            # enhanced_cls 形状: [B, 1, D] (只取出 Query 增强后的结果)
+            enhanced_cls = self.multi_cls_cross_attn_blocks[i](x_for_cross_attn)[:, 0:1, :] 
+            enhanced_cls_tokens_list_A_driven_B.append(enhanced_cls) 
 
-
+        # 拼接所有增强后的 CLS Tokens: [B, N_A, D] -> [B, 4, 1024]
         stacked_enhanced_cls_A = torch.cat(enhanced_cls_tokens_list_A_driven_B, dim=1)
-        weights_A = F.softmax(self.dino_cls_attn_weights, dim=0).view(1, N_A, 1, 1)
-        
-        weighted_A = stacked_enhanced_cls_A * weights_A
-        weighted_sum_A = torch.sum(weighted_A, dim=1, keepdim=True) # [B, 1, 4, D]
-        final_cls_A_4D = torch.mean(weighted_sum_A, dim=2, keepdim=True) # [B, 1, 1, D]
-        B = final_cls_A_4D.shape[0]
+
+        # *** 修复点 1：强制 4D 结构以确保分布式环境下的广播稳定 ***
+        # A_expanded 形状: [B, N_A, 1, D] -> [B, 4, 1, 1024]
+        A_expanded = stacked_enhanced_cls_A.unsqueeze(2).contiguous() 
+
+        # weights_A 形状: [1, N_A, 1, 1] -> [1, 4, 1, 1]
+        weights_A = F.softmax(self.dino_cls_attn_weights, dim=0).view(1, N_A, 1, 1).to(A_expanded.dtype)
+
+        # 乘法: [B, 4, 1, D] * [1, 4, 1, 1] = [B, 4, 1, D]
+        weighted_A = A_expanded * weights_A 
+
+        # *** 修复点 2：修正加权求和逻辑 (仅对 N_A 维度求和) ***
+        # weighted_A 形状 [B, 4, 1, D] 沿 dim=1 (N_A 维度) 求和
+        final_cls_A_4D = torch.sum(weighted_A, dim=1, keepdim=True) # 形状: [B, 1, 1, D]
+
+        B_batch = final_cls_A_4D.shape[0]
         D = self.global_dimension
-        final_cls_A = final_cls_A_4D.view(B, 1, D)
-        #print(f" final_cls_A shape is ......................: {final_cls_A.shape}, dtype: {final_cls_A.dtype}")
-        # ------------------------ 6. B-driven-A CLS 增强 (新策略：B 伪 CLS 查询 A Patches) ------------------------
-        T_target = self.dino_vision_tower.target_N
+        # 展平为 3D: [B, 1, D]
+        final_cls_A = final_cls_A_4D.view(B_batch, 1, D)
+
+        # ------------------------ 6. B-driven-A CLS 增强 (B 伪 CLS 查询 A Patches) ------------------------
+        # ... (与原代码一致)
         A_layers = A_tokens_proj.view(A_tokens_proj.shape[0], N_A, (1 + T_target), self.global_dimension)
         A_patches = A_layers[:, :, 1:, :] # [B, N_A, T_target, D_target]
-        # B-Driven-A 增强需要查询所有 Patches，同样需要高效压缩！
-        # 将所有 A 塔 Patches 展平 [B, N_A * T_target, D]
+        
         A_all_patches_flat = A_patches.flatten(1, 2)
         L_A_patches = A_all_patches_flat.shape[1]
-        L_A_compressed = L_A_patches // 4 # 压缩比例可调
-        A_patches_compressed_for_attn = bipartite_soft_matching_merge( # 请替换为 O(L) 
+        L_A_compressed = L_A_patches // 4 
+        A_patches_compressed_for_attn = bipartite_soft_matching_merge( 
             A_all_patches_flat, L_A_compressed, A_all_patches_flat, mode="mean"
-        ) # [B, L_A_compressed, D]       
+        ) # [B, L_A_compressed, D] 
+        
         x_for_cross_attn_B_drive_A = torch.cat([B_pseudo_cls, A_patches_compressed_for_attn], dim=1)
-        enhanced_cls_tokens_list_B_driven_A = []
-        # 简化：使用一个 CrossAttentionBlock 进行增强 (因为 K/V 已经是展平的)
-        enhanced_cls_B = self.b_drive_a_cross_attn[0](x_for_cross_attn_B_drive_A) # [B, 1, D]
+        
+        # enhanced_cls_B 形状: [B, 1, D]
+        enhanced_cls_B = self.b_drive_a_cross_attn[0](x_for_cross_attn_B_drive_A)[:, 0:1, :] 
         final_cls_B = enhanced_cls_B
+        
         # ------------------------ 7. 最终 CLS 综合聚合 ------------------------
-        stacked_final_cls = torch.cat([final_cls_A, final_cls_B], dim=1)
-        weights_final = F.softmax(self.final_cls_weights, dim=0).view(1, 2, 1)
-        enhanced_cls_token = torch.sum(stacked_final_cls * weights_final, dim=1, keepdim=True)
+        stacked_final_cls = torch.cat([final_cls_A, final_cls_B], dim=1) # [B, 2, D]
+        weights_final = F.softmax(self.final_cls_weights, dim=0).view(1, 2, 1) # [1, 2, 1]
+        # 乘法和求和: [B, 2, D] * [1, 2, 1] = [B, 2, D].sum(dim=1)
+        enhanced_cls_token = torch.sum(stacked_final_cls * weights_final, dim=1, keepdim=True) # [B, 1, D]
         
         # ------------------------ 8. 最终 tokens组合等于cls+ A_patch+B_patch ------------------------
-
-        A_patches = A_layers[:, :, 1:, :]
+        # ... (与原代码一致)
         A_half = N_A // 2
-        A_upper_group = A_patches[:, :A_half].flatten(1, 2) 
+        A_upper_group = A_patches[:, :A_half].flatten(1, 2)
         A_lower_group = A_patches[:, A_half:].flatten(1, 2)
         T_target_B = self.oryx_vision_tower.target_N
+        N_B = len(self.oryx_vision_tower.interaction_indexes)
         B_layers = B_tokens_proj.view(B_tokens_proj.shape[0], N_B, T_target_B, self.global_dimension)
         B_half = N_B // 2
         B_upper_group = B_layers[:, :B_half].flatten(1, 2) 
         B_lower_group = B_layers[:, B_half:].flatten(1, 2)
-        #print(f"DEBUG: A_upper_group 原始 Token 数量 (L_A): {A_upper_group.shape[1]}")
-        #print(f"DEBUG: B_upper_group 原始 Token 数量 (L_B): {B_upper_group.shape[1]}")
 
-        K = self.compression_K # 例如 K=4
+        K = self.compression_K 
         L_A = A_upper_group.shape[1]
         L_B = B_upper_group.shape[1]
         r_A_remove = L_A - (L_A // K)
@@ -380,24 +402,21 @@ class AdaptiveConcatenationVisionTower(nn.Module):
 
         merge_A_upper, _ = random_bipartite_soft_matching(A_upper_group, r=r_A_remove)
         merge_A_lower, _ = random_bipartite_soft_matching(A_lower_group, r=r_A_remove)
-
         A_upper_merged = merge_A_upper(A_upper_group, mode="mean")
         A_lower_merged = merge_A_lower(A_lower_group, mode="mean")
 
         merge_B_upper, _ = random_bipartite_soft_matching(B_upper_group, r=r_B_remove)
         merge_B_lower, _ = random_bipartite_soft_matching(B_lower_group, r=r_B_remove)
-
         B_upper_merged = merge_B_upper(B_upper_group, mode="mean")
         B_lower_merged = merge_B_lower(B_lower_group, mode="mean")
 
         final_upper_tokens = torch.cat([A_upper_merged, B_upper_merged], dim=1)
         final_lower_tokens = torch.cat([A_lower_merged, B_lower_merged], dim=1)
 
-        # 最终拼接：[CLS (1) + Upper (832) + Lower (832)] = 1665
+        # 最终拼接：[CLS (1) + Upper (L_upper) + Lower (L_lower)]
         final_tokens = torch.cat([enhanced_cls_token, final_upper_tokens, final_lower_tokens], dim=1)
 
-        #print(f" final_tokens shape is ......................: {final_tokens.shape}, dtype: {final_tokens.dtype}")
-        return final_tokens, x         
+        return final_tokens, x
 
     @property
     def dummy_feature(self):

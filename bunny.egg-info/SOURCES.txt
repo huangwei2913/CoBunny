@@ -17,6 +17,7 @@ bunny/eval/model_vqa_cmmmu.py
 bunny/eval/model_vqa_loader.py
 bunny/eval/model_vqa_loader_gqa.py
 bunny/eval/model_vqa_loader_mme.py
+bunny/eval/model_vqa_loader_mme_mixencoders.py
 bunny/eval/model_vqa_mmbench.py
 bunny/eval/model_vqa_mmmu.py
 bunny/eval/model_vqa_science.py
@@ -86,6 +87,10 @@ bunny/util/utils.py
 bunny/util/s2wrapper/__init__.py
 bunny/util/s2wrapper/core.py
 bunny/util/s2wrapper/utils.py
+checkpoints-finetune/bestloracheckpoint/zero_to_fp32.py
+checkpoints-pretrain/oryx_phi/find_min_loss.py
+checkpoints-pretrain/oryx_phi/jb.py
+checkpoints-pretrain/oryx_phi/rb.py
 dinov3/__init__.py
 dinov3/checkpointer/__init__.py
 dinov3/checkpointer/checkpointer.py
