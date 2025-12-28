@@ -50,25 +50,6 @@ class BaseVisionTower(nn.Module):
         raise NotImplementedError("Subclasses must implement forward")
 
 
-
-    # def forward(self, images):   #后面也可以想办法优化训练的这个地方，让训练更加加速
-    #     image_features = []
-    #     if type(images) is list:
-           
-    #         for image in images:
-    #             zz= self._forward(image.unsqueeze(0))
-    #             r = zz.shape[1] // 2
-    #             zz = bipartite_soft_matching_merge(zz,r,zz)
-    #             image_features.append(zz)         
-    #     else:
-    #         image_features = self._forward(images)
-    #         r = image_features.shape[1] // 2
-    #         image_features = bipartite_soft_matching_merge(image_features,r,image_features)
-
-    #     return image_features
-
-
-
     def forward(self, images):
         if type(images) is list:
             image_features = [

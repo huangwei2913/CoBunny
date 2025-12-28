@@ -1,0 +1,74 @@
+# 阶段1：预训练（只练投影层 Projector）
+#任务：建立混合编码器（Mixed Vision Tower）与 Phi-1.5 的联系。
+#关键点：--version plain。
+# 注意：一定要在这里解决你之前的 IncompatibleKeys 报错
+
+#!/bin/bash
+
+# ========================================================
+# 1. 硬件与分布式环境配置 (支持多卡加速)
+# ========================================================
+# 如果是单机多卡，DeepSpeed 会自动识别。如果有 hostfile 请取消注释。
+# HOSTFILE="./script/deepspeed/hostfile"
+MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
+MASTER_PORT=${MASTER_PORT:-"29501"}
+
+# ========================================================
+# 2. 模型与架构参数
+# ========================================================
+MODEL_TYPE="phi-1.5"
+BASE_MODEL="/mnt/conda_data/microsoft/phi-1_5"
+# 关键：这里传你代码中定义的逻辑开关名称
+VISION_TOWER="mixedencoder" 
+OUTPUT_DIR="./checkpoints-pretrain/bunny-phi1.5-mixed-pretrain"
+
+mkdir -p $OUTPUT_DIR
+
+# ========================================================
+# 3. 启动训练 (使用 DeepSpeed)
+# ========================================================
+# 注意：Pretrain 阶段通常建议使用 Zero-2 性能更佳，显存极度紧张才用 Zero-3
+deepspeed \
+    --master_addr $MASTER_ADDR \
+    --master_port $MASTER_PORT \
+    bunny/train/train.py \
+    --deepspeed ./script/deepspeed/zero2_mixencoders_pretraing.json \
+    --model_name_or_path $BASE_MODEL \
+    --model_type $MODEL_TYPE \
+    --version plain \
+    --vision_tower $VISION_TOWER \
+    --vision_tower_dino /mnt/facebook/dinov3-convnext-large-pretrain-lvd1689m \
+    --vision_tower_oryx  oryx_vit:/mnt/THUdyhOryx-ViT/oryx_vit.pth \
+    --compression_K 4 \
+    --mm_hidden_size 1024 \
+    --data_path /mnt/conda_data/Bunny-v1.1-data/pretrain/bunny_pretrain_laion_2m.json \
+    --image_folder /mnt/conda_data/Bunny-v1.1-data/pretrain/images \
+    --mm_projector_type mlp2x_gelu \
+    --tune_mm_mlp_adapter True \
+    --freeze_backbone True \
+    --image_aspect_ratio square \
+    --bf16 True \
+    --output_dir $OUTPUT_DIR \
+    --num_train_epochs 1 \
+    --per_device_train_batch_size 1 \
+    --per_device_eval_batch_size 2 \
+    --gradient_accumulation_steps 8 \
+    --eval_strategy "steps" \
+    --save_strategy "steps" \
+    --save_steps 500 \
+    --save_total_limit 3 \
+    --learning_rate 1e-3 \
+    --weight_decay 0. \
+    --warmup_ratio 0.03 \
+    --lr_scheduler_type "cosine" \
+    --logging_steps 1 \
+    --tf32 False \
+    --model_max_length 2048 \
+    --gradient_checkpointing True \
+    --dataloader_num_workers 4 \
+    --lazy_preprocess True \
+    --eval_steps  500 \
+    --load_best_model_at_end True \
+    --metric_for_best_model  "loss"  \
+    --greater_is_better  False  \
+    --report_to none 2>&1 | tee $OUTPUT_DIR/pretrain.log

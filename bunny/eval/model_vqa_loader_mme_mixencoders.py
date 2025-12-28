@@ -106,19 +106,22 @@ def eval_model(args):
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
 
-    # 【核心修改】锁定单张 T4 显卡，避免跨卡传输
-    # 如果你的 T4 编号是 6，请保持 cuda:6；如果是唯一的一张卡，可以写 cuda:0
-    device_id = "cuda:6" 
+    # --- 核心修改：动态分配显卡 ---
+    # 逻辑：如果你有 8 张卡，chunk_idx 为 0 就用 cuda:0，为 1 就用 cuda:1，以此类推
+    num_gpus = torch.cuda.device_count()
+    gpu_id = args.chunk_idx % num_gpus 
+    device_id = f"cuda:{gpu_id}"
     device = torch.device(device_id)
-    print(f"🚀 正在加载模型到单张 NVIDIA T4 ({device_id})...")
+    
+    print(f"🚀 [Chunk {args.chunk_idx}] 正在加载模型到 NVIDIA T4 ({device_id})...")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     
-    # 【核心修改】强制所有分片进入同一张显卡，彻底停用自动分片钩子
+    # 强制所有分片进入计算出的 gpu_id，彻底停用自动分片
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         low_cpu_mem_usage=True,
-        device_map={"": device_id}, 
+        device_map={"": device_id}, # 这里动态使用上面算出来的 device_id
         torch_dtype=torch.bfloat16, 
         trust_remote_code=True,
         local_files_only=True,

@@ -800,134 +800,127 @@ import os
 from transformers import CLIPImageProcessor
 import torch.distributed as dist
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import CLIPImageProcessor
+import os
+
 class OryxViTWrapper(nn.Module):
-    def __init__(self, vision_tower, path, args, delay_load=False):
+    def __init__(self, vision_tower, args, delay_load=False):
         super().__init__()
         self.is_loaded = False
-        self.vision_tower_name = vision_tower
+        self.vision_tower_name = vision_tower  # 动态传入模型路径
         self.args = args
-        self.path = path
-        self.select_layer = -1
-        if self.select_layer < -1: self.select_layer += 1
-        self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
+        self.vision_tower = None
+        self.image_processor = None
+        # 1. 核心属性标准化 (不再写死路径)
         self.output_dim = 1152
-        self._num_layers = 27 # 总层数 L
-        self.target_embed_dim = self.output_dim
         self.patch_size = 16
-        self.target_grid_size = 384 // self.patch_size # 24
+        self.target_grid_size = getattr(args, "mm_vision_grid_size", 24) 
         self.target_N = self.target_grid_size * self.target_grid_size # 576
-        self.interaction_indexes =[2,5,10,26]
+        
+        # 2. 索引选择：建议 [5, 12, 18, 26] 以获得更好的语义分布
+        self.interaction_indexes = getattr(args, "oryx_layers", [5, 12, 18, 26]) 
 
         if not delay_load:
             self.load_model()
-        elif getattr(args, "unfreeze_mm_vision_tower", False):
-            # TODO: better detector is needed.
-            print(f"The checkpoint seems to contain `vision_tower` weights: `unfreeze_mm_vision_tower`: True.")
-            self.load_model()
 
-
-    def load_model(self, device_map=None):
+    def load_model(self):
         if self.is_loaded:
-            print('{} is already loaded, `load_model` called again, skipping.'.format(self.vision_tower_name))
             return
-        local_processor_path = "/mnt/conda_data/openai/clip-vit-large-patch14"
-        #self.image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-large-patch14")
-        self.image_processor = CLIPImageProcessor.from_pretrained(local_processor_path)
-        self.image_processor.image_mean = [0.5, 0.5, 0.5]
-        self.image_processor.image_std = [0.5, 0.5, 0.5]
-        #print("Loading vision model...")
 
-        self.vision_tower = create_siglip_vit(path=self.path, image_size = 384,  model_name='siglip_so400m_patch16_384',
-                                                gradient_checkpointing=False)  #默认就是这个大小
-        
-        assert hasattr(self.vision_tower, 'get_intermediate_layers'), "Vision tower must implement get_intermediate_layers."
-        for p in self.vision_tower.parameters():
-            p.requires_grad = False
+        # 1. 核心解析逻辑：拆分 标识符 和 真实路径
+        # 处理格式: "oryx_vit:/mnt/path/to/model.pth"
+        if ":" in self.vision_tower_name:
+            parts = self.vision_tower_name.split(":")
+            # 这里的 tag 可能是 oryx_vit，我们取最后一部分作为真实路径
+            oryx_ckpt_path = parts[-1] 
+        else:
+            oryx_ckpt_path = self.vision_tower_name
+
+        # 2. 健壮性检查：确保路径是一个存在的文件
+        if not os.path.isfile(oryx_ckpt_path):
+            # 如果只是传了目录，尝试补全文件名
+            potential_file = os.path.join(oryx_ckpt_path, "oryx_vit.pth")
+            if os.path.isfile(potential_file):
+                oryx_ckpt_path = potential_file
+            else:
+                raise FileNotFoundError(f"❌ Oryx权重文件不存在: {oryx_ckpt_path}")
+
+        print(f"✅ [Oryx-Loader] 检测到有效权重路径: {oryx_ckpt_path}")
+
+        # 3. 彻底离线化：手动配置 Image Processor
+        # 不再通过 .from_pretrained() 加载，避免触发网络请求
+        self.image_processor = CLIPImageProcessor(
+            do_resize=True,
+            size={"shortest_edge": 384},
+            do_center_crop=True,
+            crop_size={"height": 384, "width": 384},
+            do_normalize=True,
+            image_mean=[0.5, 0.5, 0.5],
+            image_std=[0.5, 0.5, 0.5]
+        )
+
+        # 4. 初始化模型主体
+        # 确保你在文件头部已经 from .oryx_vit import create_siglip_vit
+        try:
+            from .oryx_vit import create_siglip_vit
+            self.vision_tower = create_siglip_vit(
+                path=oryx_ckpt_path, 
+                image_size=384, 
+                model_name='siglip_so400m_patch16_384'
+            )
+        except Exception as e:
+            print(f"❌ 加载 Oryx 核心模型失败: {e}")
+            raise e
+
+        # 5. 状态设定
+        self.vision_tower.requires_grad_(getattr(self.args, "unfreeze_mm_vision_tower", False))
         self.vision_tower.eval()
         self.is_loaded = True
+        print(f"🚀 [Oryx-Loader] 混合编码器 B 塔 (Oryx) 准备就绪。")
 
-    def train(self, mode = True):
-        self.training = mode
-        if self.is_loaded:
-            self.vision_tower.eval()
-
-    def forward_func(self, images, force_fix_size=False, cal_attn_pool=False):
-        if type(images) is list:
-             # 如果输入是列表，使用 VisionTransformer 的 forward_features_list 方法
-             # 此时无法提取中间层，所以保持原逻辑返回最后一层特征
-             images = torch.cat(images, dim=0)
-             #raise NotImplementedError("List input not yet fully supported for multi-layer extraction.")
-        # 1. 提取指定的中间层特征
-        # 由于 SigLIP 模型（VisionTransformer）没有 CLS Token，我们不需要 return_prefix_tokens=True
-        # outputs 是一个包含 [B, T_raw, D] 特征张量的元组 (tuple)
+    def _forward(self, images):
+        # 确保数据在正确的设备和精度上
+        images = images.to(device=self.device, dtype=self.dtype)
+        
+        # 提取中间层
         all_layer_outputs = self.vision_tower.get_intermediate_layers(
-            images.to(self.dtype), 
+            images, 
             n=self.interaction_indexes, 
-            reshape=False, # 不需要 reshape 成 4D
-            return_prefix_tokens=False, # SigLIP 配置中 class_token=False
-            norm=False
+            reshape=False,
+            return_prefix_tokens=False # SigLIP 本身没有 CLS
         )
+        
         aligned_layers = []
-        # 2. 遍历并对齐中间层特征
-        for i, feat in enumerate(all_layer_outputs):
-            # feat shape: [B, T_raw, D]
-            B, T_raw, D = feat.shape
+        for feat in all_layer_outputs:
+            # 1. 空间插值对齐 [B, T_raw, D] -> [B, 576, D]
+            if feat.shape[1] != self.target_N:
+                feat = F.interpolate(
+                    feat.permute(0, 2, 1), size=self.target_N, 
+                    mode="linear", align_corners=False
+                ).permute(0, 2, 1).contiguous()
             
-            # SigLIP 模型的 D 恒定为 self.target_embed_dim=1152，跳过投影
+            # 2. 统一接口：拼接一个占位符 CLS Token
+            # 虽然你的混合编码器会用 WeightedPseudoCLSHead 重新计算，
+            # 但这里加上占位符能让全系统的 view 逻辑统一为 (1 + 576)
+            placeholder_cls = feat.mean(dim=1, keepdim=True)
+            combined = torch.cat([placeholder_cls, feat], dim=1)
+            aligned_layers.append(combined)
 
-            # 序列长度对齐/插值
-            if T_raw != self.target_N:
-                # 1D 线性插值：[B, T_raw, D] -> [B, D, T_raw] -> [B, D, target_N] -> [B, target_N, D]
-                feat_interp = F.interpolate(
-                    feat.permute(0, 2, 1),  # [B, D, T_raw]
-                    size=self.target_N,
-                    mode="linear",
-                    align_corners=False
-                ).permute(0, 2, 1).contiguous()  # [B, target_N, D]
-                feat_proj = feat_interp
-            else:
-                feat_proj = feat 
-                
-            aligned_layers.append(feat_proj.to(images.dtype))  # [B, target_N, D]    
-        # 3. 结果返回
-        last_layer_features = aligned_layers[-1] # 最后一层对齐特征
-        all_intermidiate_features = torch.cat(aligned_layers, dim=1) # 所有层级对齐特征的拼接
-        image_size = (self.target_grid_size, self.target_grid_size)
-        # 返回 (最后一层特征, 所有层拼接特征)
-        return last_layer_features, all_intermidiate_features, image_size
-            
+        all_intermediate_features = torch.cat(aligned_layers, dim=1) # [B, 4*(1+576), 1152]
+        return aligned_layers[-1], all_intermediate_features
 
-    def forward(self, images, cal_attn_pool=False):
+    def forward(self, images):
         with torch.no_grad():
-            last_layer_features, all_intermidiate_features, image_size = self.forward_func(images, cal_attn_pool=cal_attn_pool)
-
-        # 返回逻辑与 DinoVisionTower 相似
-        #print("last_layer_features......................",last_layer_features.shape)
-        #print("all_intermidiate_features......................",all_intermidiate_features.shape)
-        return last_layer_features, image_size, all_intermidiate_features
+            return self._forward(images)
 
     @property
-    def dummy_feature(self):
-        return torch.zeros(1, 1152, device=self.device, dtype=self.dtype)
-
+    def dtype(self): return self.vision_tower.pos_embed.dtype
     @property
-    def dtype(self):
-        return self.vision_tower.pos_embed.dtype
-
+    def device(self): return self.vision_tower.pos_embed.device
     @property
-    def device(self):
-        return self.vision_tower.pos_embed.device
-
+    def hidden_size(self): return self.output_dim
     @property
-    def hidden_size(self):
-        return self.output_dim
-
-    @property
-    def layer_count(self):
-        return len(self.interaction_indexes)
-    
-    @property
-    def config(self):
-        return type('OryxConfigWrapper', (), {
-            'patch_size': 16,
-        })()
+    def layer_count(self): return len(self.interaction_indexes)

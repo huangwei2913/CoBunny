@@ -21,20 +21,27 @@ class calculate_metrics:
         return
 
     def parse_pred_ans(self, pred_ans):
-        pred_label = None
-        if pred_ans in ["yes", "no"]:
-            pred_label = pred_ans
-        else:
-            prefix_pred_ans = pred_ans[:4]
+        import re
+        # 1. 强制转小写
+        pred_ans = str(pred_ans).lower()
+        
+        # 2. 使用正则匹配单词。 \b 表示单词边界，确保不会匹配到 eyes 或 notice 这样的词
+        # 我们寻找独立的 yes 或 no
+        has_yes = re.search(r'\byes\b', pred_ans)
+        has_no = re.search(r'\bno\b', pred_ans)
 
-            if "yes" in prefix_pred_ans:
-                pred_label = "yes"
-            elif "no" in prefix_pred_ans:
-                pred_label = "no"
+        if has_yes and not has_no:
+            return "yes"
+        elif has_no and not has_yes:
+            return "no"
+        elif has_yes and has_no:
+            # 如果两个都有（比如 "yes, not no"），取第一个出现的
+            if has_yes.start() < has_no.start():
+                return "yes"
             else:
-                pred_label = "other"
-
-        return pred_label
+                return "no"
+        else:
+            return "other"
 
     def compute_metric(self, gts, preds):
         assert len(gts) == len(preds)

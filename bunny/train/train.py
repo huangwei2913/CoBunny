@@ -48,44 +48,11 @@ class ModelArguments:
     mm_mask_drop_ratio_lower: Optional[float] = field(default=None)
     mm_vision_select_feature: Optional[str] = field(default="patch")
     mm_dense_connector_type: Optional[str] = field(default='dci')  #密集投影层类型
-   
+    vision_tower_dino: Optional[str] = field(default=None, metadata={"help": "DINOv2 子塔的权重路径"})
+    vision_tower_oryx: Optional[str] = field(default=None, metadata={"help": "Oryx/SigLIP 子塔的权重路径"})
+    compression_K: int = field(default=4, metadata={"help": "ToMe 算法的压缩倍率"})
+    mm_hidden_size: int = field(default=1024)
 
-
-
-# cache_dir: Optional[str] = None
-# 模型或数据缓存的目录路径，存放预训练模型权重等文件。如果不指定则使用默认缓存路径。
-# optim: str = "adamw_torch"
-# 优化器类型，默认是adamw_torch，即PyTorch实现的AdamW优化器。
-# remove_unused_columns: bool = False
-# 是否在数据预处理时移除模型不需要的列。默认不移除。
-# freeze_mm_mlp_adapter: bool = False
-# 是否冻结多模态（mm）MLP适配器的参数，训练时不更新权重，用于部分微调。
-# mpt_attn_impl: Optional[str] = "triton"
-# 模型注意力机制实现方式，指定是用triton高效实现。
-# model_max_length: int = 512
-# 模型输入的最大序列长度，长于此长度的序列将被截断，短序列右侧填充。
-# double_quant: bool = True
-# 是否开启双量化压缩技术，用于压缩量化统计数据，减少显存和计算需求，提升效率。
-# quant_type: str = "nf4"
-# 量化使用的数据类型，常见有fp4（浮点4位）和nf4（归一化浮点4位），影响量化精度。
-# bits: int = 16
-# 量化使用的数据位数，16位表示半精度，通常是bf16或fp16。
-# lora_enable: bool = False
-# 是否启用LoRA（低秩适配）技术，常用于轻量级微调。
-# lora_r: int = 64
-# LoRA中的秩参数，控制LoRA矩阵的大小，越大模型表达能力越强。
-# lora_alpha: int = 16
-# LoRA的缩放系数，影响权重更新的幅度。
-# lora_dropout: float = 0.05
-# LoRA模块中的dropout概率，用于正则化防止过拟合。
-# lora_weight_path: str = ""
-# LoRA预训练权重路径，用于加载已有的LoRA权重进行继续训练或微调。
-# lora_bias: str = "none"
-# LoRA是否使用偏置，通常为none不启用。
-# mm_projector_lr: Optional[float] = None
-# 多模态投影层的学习率，可单独设置，默认和全局学习率保持一致。
-# group_by_modality_length: bool = False
-# 是否基于不同模态输入序列长度进行分组处理，方便高效批处理。
 
 
 @dataclass
@@ -123,15 +90,6 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_bias: str = "none"
     mm_projector_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
-
-# 你自定义的TrainingArguments是继承自transformers.TrainingArguments的。这意味着它会继承父类里所有的字段和功能。
-
-# 你自定义的新字段只是为了补充或覆盖部分配置，没有完全重写所有参数。
-
-# 所以即使你的类代码中看不到save_strategy和save_steps，它们依旧存在于父类里，参数解析时会自动识别并使用。
-
-# 这是一种常见的设计：自定义只添加需要修改或新增的配置，核心训练参数由父类TrainingArguments保障。
-
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -271,13 +229,6 @@ def train():
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
 
-# BitsAndBytes是为大型Transformer模型提供高效4bit/8bit量化方案的Python库，可以大幅降低模型显存占用并提升推理和训练效率，
-# 已成为Hugging Face生态中处理大型模型的关键工具之一。BitsAndBytes（BNB）是Hugging Face生态中用于大型语言模型（LLM）量化的高效库。
-# 它通过CUDA实现轻量级Python接口，支持4bit和8bit量化，显著减少模型显存占用和计算资源，
-# 使得大模型能在资源有限的硬件上推理和训练。BNB包含量化的线性层模块、8bit优化器，还支持结合低秩适配（QLoRA）微调技术。
-# 用户可通过简单配置，在transformers库中直接加载4bit/8bit量化模型，大幅提升运行效率和降低资源需求。
-
-
     bnb_model_from_pretrained_args = {}
     if training_args.bits in [4, 8]:
         from transformers import BitsAndBytesConfig
@@ -390,53 +341,6 @@ def train():
 
             model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)  #这是模型中获取输入嵌入层（embedding layer）的接口，返回模型输入embedding模块，通常是一个nn.Embedding层
 
-    #嵌入层的权重矩阵相当于一个查表表格，行数是词汇表大小，列数是嵌入向量维度，存储的是每个token对应的向量表示。
-
-# 每一个大语言模型（LLM）的预训练模型都会包含一个输入嵌入模块（embedding layer），这个模块包含了一个嵌入矩阵。
-
-# 详细说明
-# 这个嵌入模块是模型的核心组成部分，用于将输入的离散token id映射成连续的向量表示。
-
-# 预训练模型权重会包含这个嵌入矩阵的权重，因此加载预训练模型时，嵌入层的权重会被一起加载进来。
-
-# 在训练或微调过程中，这个嵌入层的参数是可以被更新的，通过反向传播算法计算梯度，改进嵌入表示，提升对任务的适应能力。
-
-# 简单理解
-# 输入token先通过嵌入层转成向量，模型后续层基于这些向量学习文本关系。
-
-# 嵌入层的权重训练得越好，表示的向量语义越丰富，模型理解能力也越强。
-
-# 预训练完成后，通过微调，嵌入层还可以进一步微调以适应具体任务。
-
-# 技术细节
-# 嵌入矩阵大小一般为 
-# V×D，
-
-# 其中 
-# V
-# V 是词汇表大小，
-# D
-# D 是嵌入向量维度。
-
-# 加载预训练模型时：
-
-# 预训练权重中包含这个 
-
-# V×D 的嵌入矩阵参数。
-
-# 调用model.get_input_embeddings()能够访问这个embedding模块。
-
-# 训练时反向传播会更新嵌入矩阵中涉及的行，改善token的向量表示。
-
-# 总结
-# 每个LLM预训练模型都会自带输入嵌入模块（embedding层）。
-
-# 该模块随模型权重一同加载。
-
-# 在微调阶段，嵌入层参数可以被更新，提升模型对特定任务的表现。
-
-# 这是Transformer模型和LLM普遍的设计和训练机制
-
 
     if training_args.lora_enable:
         from peft import LoraConfig, get_peft_model
@@ -462,6 +366,24 @@ def train():
         conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
     else:
         conversation_lib.default_conversation = conversation_lib.conv_templates["default"]
+
+
+
+    # --- 在它下面插入这几行调试代码 ---
+    rank0_print(f"\n" + "="*40)
+    rank0_print(f"🔍 正在自检模板对齐情况...")
+    rank0_print(f"🔥 命令行传入的 version: {model_args.version}")
+    template_name = getattr(conversation_lib.default_conversation, 'version', 
+                            getattr(conversation_lib.default_conversation, 'name', 'Unknown'))
+    rank0_print(f"🔥 实际激活的模板名称: {template_name}")
+    rank0_print(f"🔥 角色设定 (Roles): {conversation_lib.default_conversation.roles}")
+    rank0_print(f"🔥 分隔符 (Sep): {repr(conversation_lib.default_conversation.sep)}")
+    
+    # 打印一个真实的预览，看看图片占位符和文字是怎么拼接的
+    test_prompt = conversation_lib.default_conversation.get_prompt()
+    rank0_print(f"🔥 模板预览:\n{test_prompt}")
+    rank0_print("="*40 + "\n")
+
 
     model.get_model().initialize_vision_modules(model_args=model_args)
     # ...
@@ -548,6 +470,23 @@ def train():
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
 
+    # 2. 从训练集中切出一小部分作为验证集 (例如 2000 条，足够反映收敛情况)
+    full_train_dataset = data_module['train_dataset']
+    num_val_samples = 2000 
+    num_train_samples = len(full_train_dataset) - num_val_samples
+
+    # 使用 torch.utils.data.random_split 进行随机切分
+    train_dataset, eval_dataset = torch.utils.data.random_split(
+                                         full_train_dataset, 
+                                         [num_train_samples, num_val_samples],
+                                        generator=torch.Generator().manual_seed(42) # 固定随机种子，确保多机训练时行为一致
+                                        )
+
+    # 3. 更新 data_module
+    data_module['train_dataset'] = train_dataset
+    data_module['eval_dataset'] = eval_dataset
+        
+
 
     #   返回dict(train_dataset=train_dataset,
     #            eval_dataset=None,
@@ -559,7 +498,47 @@ def train():
                            tokenizer=tokenizer,
                            args=training_args,
                            **data_module)
-    
+
+# ==================== 🔍 更加稳健的自检 Debug 代码 ====================
+    if training_args.local_rank == 0 or training_args.local_rank == -1:
+        print("\n" + "="*50)
+        print("🚀 [Debug] 正在抽样检查喂给模型的数据格式...")
+        
+        try:
+            # 获取一个 batch
+            sample_batch = next(iter(trainer.get_train_dataloader()))
+            
+            # 1. 获取 Input IDs 并移至 CPU 转换为 list
+            input_ids = sample_batch['input_ids'][0].detach().cpu().tolist()
+            print(f"👉 [Input IDs 前 10 个 Token]: {input_ids[:10]}")
+            if any(tid < 0 for tid in input_ids):
+                print(f"✅ 发现特殊的 Image Token Index!")
+            else:
+                print(f"⚠️ 警告：Input IDs 里全是正数，说明 <image> 没被正确转换成特殊索引！")
+            # 2. 检查 Labels 并处理 -100
+            labels = sample_batch['labels'][0].detach().cpu().tolist()
+            
+            # 找到非 -100 的部分（即模型真正学习的部分）
+            # 我们把 -100 过滤掉，或者替换成一个可见字符
+            filtered_input_ids = [tid for tid in input_ids if tid >= 0]
+            decoded_text = tokenizer.decode(filtered_input_ids, skip_special_tokens=False)
+
+            # 找到模型计算 Loss 的部分
+            loss_mask_tokens = [tid for tid, lab in zip(input_ids, labels) if lab != -100]
+            decoded_loss_part = tokenizer.decode(loss_mask_tokens, skip_special_tokens=False)
+
+            print(f"\n👉 [完整输入流解码] (含 Image Token 占位符):\n{decoded_text[:1000]}") # 截断前1000字符防止刷屏
+            print(f"\n👉 [计算 Loss 的文本内容]:\n{decoded_loss_part}")
+            
+            if 'images' in sample_batch:
+                print(f"\n👉 [图像 Tensor 形状]: {sample_batch['images'].shape}")
+            
+            print("\n" + "="*50 + "\n")
+            
+        except Exception as e:
+            import traceback
+            print(f"❌ [Debug] 抽样检查依然失败: {e}")
+            traceback.print_exc()
     checkpoints = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
     if checkpoints:
         # 选最近的checkpoint
@@ -602,138 +581,3 @@ if __name__ == "__main__":
     train()
 
 
-# 1. 自定义训练采样器 _get_train_sampler
-# 根据数据集长度和配置选择采样策略。
-
-# 如果需要根据模态长度分组，会使用LengthGroupedSampler以保证批次内元素长度相近，减少填充浪费。
-
-# 否则使用默认采样器（如随机采样RandomSampler或分布式采样DistributedSampler）。
-
-# 这是训练数据加载和批处理重要环节，决定训练样本的顺序和采样方式。
-
-# 2. 优化器创建 create_optimizer
-# 负责构建训练过程用的优化算法（如Adam、AdamW等）。
-
-# 对模型参数按照是否权重衰减、是否属于视觉模块（mm_projector, vision_tower）进行分组，支持不同学习率和权重衰减设置。
-
-# 支持兼容8bit量化优化器（bitsandbytes），提升内存效率。
-
-# 设计灵活，可传入自定义优化器或重载函数。
-
-# 3. 检查点保存 _save_checkpoint 和模型保存 _save
-# 检查点保存逻辑根据是否只微调视觉适配器（tune_mm_mlp_adapter）区别对待。
-
-# 可选择只保存视觉adapter部分权重，轻量化保存并便于后续加载。
-
-# 否则调用父类保存所有模型权重。
-
-# 保障训练中断恢复和模型持久化。
-
-# 总结
-# 功能模块	作用
-# 训练采样器 _get_train_sampler	控制训练数据如何分批采样，支持长度分组
-# 优化器创建 create_optimizer	精细划分参数组，允许不同学习率和权重衰减，支持量化优化器
-# 检查点和模型保存 _save_checkpoint/_save	有条件保存视觉adapter或全模型权重，支持断点续训和模型持久化
-# 一般来说，一个自定义Trainer类要完整管理训练流程，通常都会覆盖这些方法以满足特殊训练需求。
-
-# 如需构建自己的训练器或对训练流程进行深度定制，可重点关注这些模块设计。
-
-# 这段代码中的几个方法确实是一个自定义Trainer通常会实现的重要部分：
-
-# _get_train_sampler：定义训练时如何采样数据，支持按模态长度分组（LengthGroupedSampler），减少填充浪费，提高效率。
-
-# create_optimizer：定义优化器的构建逻辑，支持不同参数组设置不同学习率和权重衰减，支持bitsandbytes量化优化器。
-
-# _save_checkpoint和_save：定义训练检查点和模型保存策略，支持仅保存视觉适配器（mm_projector）部分或整体模型。
-
-# 总结来说，一个训练器通常至少要实现数据采样、优化器创建、模型保存这几个核心功能，以支撑训练流程的定制和高效运行。根据需求还会增加很多辅助功能。这段代码中实现的主要是Trainer类的几个关键功能模块：
-
-# _get_train_sampler：决定如何采样训练数据，支持按模态长度分组采样，减少padding浪费，提高训练效率。
-
-# create_optimizer：构建优化器，支持对不同参数组设置不同学习率与权重衰减，以及支持bitsandbytes量化优化器。
-
-# _save_checkpoint和_save：实现训练过程中的模型保存和断点续训，支持仅保存视觉适配器部分权重以节省空间。
-
-# 一般而言，一个自定义的Trainer至少需要实现训练采样、优化器配置和模型保存这几个模块，以满足对训练流程的定制。
-
-# 这些是训练器的核心组成部分，确保训练过程的数据加载、优化器更新和模型持久化能按需工作。
-
-
-
-
-# 这段代码中：
-
-# python
-# data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
-
-# trainer = BunnyTrainer(
-#    model=model,
-#    tokenizer=tokenizer,
-#    args=training_args,
-#    **data_module
-# )
-# 作用解析：
-# data_module 是基于tokenizer和data_args构建的一个数据处理模块，其中包含训练集数据集train_dataset（和可能的验证集）以及数据批处理的data_collator。
-
-# 这个数据处理模块负责从原始数据到模型输入格式的转化，包括：
-
-# 利用tokenizer将文本转为token序列；
-
-# 将视觉数据（例如图像）通过视觉编码器对应的处理器转为模型可接受的格式；
-
-# 对输入数据进行批次组织和padding处理（通过data_collator）；
-
-# 训练器（Trainer）BunnyTrainer 接收模型、tokenizer、训练参数和上述数据模块，负责训练时的数据加载、批次迭代、前向和反向计算、梯度更新等流程。
-
-# 在训练过程中，训练器会结合数据加载器（DataLoader）和tokenizer处理方式，还可能结合视觉编码器的预处理逻辑，来逐个批次处理训练数据样本，确保每一批数据都符合模型输入要求。
-
-# 总结
-# 组成部分	作用
-# tokenizer	将文本转化为模型理解的token序列
-# data_module	构建数据集和数据批处理，确保输入格式正确
-# BunnyTrainer	管理训练流程，结合模型和数据执行训练迭代
-# 视觉编码器	对视觉数据进行编码和预处理，作为模型输入的一部分
-# 综上，训练器确实基于模型、数据加载器、tokenizer和视觉编码器等模块，动态处理训练数据，执行训练过程。
-
-# 参考了PyTorch和Hugging Face transformers的Trainer简介和工作流程。是的，理解正确。
-
-# 这里make_supervised_data_module负责构建一个数据处理模块，通常包含了训练数据集（train_dataset）、数据批处理函数（data_collator）等。这个模块负责将原始数据处理成模型可接受的格式，包括对文本通过tokenizer分词、对视觉数据通过视觉编码器的预处理等。
-
-# 随后通过BunnyTrainer加载模型、tokenizer、训练参数和数据模块后，训练器会根据这些配置：
-
-# 利用数据模块的训练数据集和批处理器，读取和处理训练样本（包括视觉和语言数据）。
-
-# 按批次将数据送入模型，结合tokenizer的编码方式和视觉编码器的处理信息。
-
-# 在训练迭代中，训练器会自动管理前向传播、反向传播、优化器更新等。
-
-# 所以，trainer确实依据模型、tokenizer、数据加载模块和视觉编码器的信息来动态处理每一个训练数据样本，确保训练过程顺畅和高效。
-
-
-# 具体来说：
-
-# trainer.train() 会安排训练循环，每个batch自动经过数据加载器产生数据样本；
-
-# 样本输入模型调用forward完成输出计算；
-
-# 计算loss后自动调用backward做梯度反传；
-
-# 优化器根据梯度更新模型权重；
-
-# 自动处理混合精度计算、分布式训练多GPU协调、梯度累计等细节；
-
-# 不断重复直到训练结束或满足条件终止。
-
-# 所以你只需要配置好模型、数据模块、训练参数，训练器会「自动」协调运行训练全过程，极大简化代码复杂度。
-
-# 此外：
-
-# 自定义Trainer可以重写部分核心函数（比如自定义采样器、优化器创建、保存逻辑）满足特殊需求；
-
-# 训练器实现了断点续训、日志记录、模型保存等实用功能。
-
-# 总结：
-
-# 在PyTorch + transformers典型训练框架中，train函数是入口，train()中训练循环封装了所有训练步骤，用户无需显式管理forward、backward、优化器步骤，只需关注模型和数据。
-
-# 这种设计提高了开发效率，降低出错率，推动模型训练流程自动化。你理解是正确的
