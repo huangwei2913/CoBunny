@@ -13,7 +13,7 @@
 MASTER_ADDR=${MASTER_ADDR:-"192.168.0.3"}
 MASTER_PORT=${MASTER_PORT:-"29501"}
 HOSTFILE="./script/deepspeed/hostfile"
-INCLUDE_STR="192.168.0.3:0,1,2,3,4,5,6,7@192.168.0.2:1,2,3,4,5,6,7"
+
 # ========================================================
 # 2. 模型与架构参数
 # ========================================================
@@ -24,14 +24,12 @@ VISION_TOWER="mixedencoder"
 OUTPUT_DIR="./checkpoints-pretrain/bunny-phi1.5-mixed-pretrain"
 
 mkdir -p $OUTPUT_DIR
-
 # ========================================================
 # 3. 启动训练 (使用 DeepSpeed)
 # ========================================================
 # 注意：Pretrain 阶段通常建议使用 Zero-2 性能更佳，显存极度紧张才用 Zero-3
 deepspeed \
     --hostfile $HOSTFILE \
-    --include "$INCLUDE_STR" \
     --master_addr $MASTER_ADDR \
     --master_port $MASTER_PORT \
     bunny/train/train.py \
@@ -54,7 +52,7 @@ deepspeed \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 8 \
-    --evaluation_strategy "steps" \
+    --eval_strategy "steps" \
     --eval_steps 500 \
     --save_strategy "steps" \
     --save_steps 500 \

@@ -29,6 +29,7 @@ bunny/model/bunny_arch.py
 bunny/model/language_model/bunny_llama.py
 bunny/model/language_model/bunny_minicpm.py
 bunny/model/language_model/bunny_phi.py
+bunny/model/language_model/bunny_phi3.py
 bunny/model/language_model/bunny_qwen.py
 bunny/model/language_model/bunny_stablelm.py
 bunny/model/language_model/llama/__init__.py
