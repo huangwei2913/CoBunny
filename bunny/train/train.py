@@ -165,59 +165,77 @@ def checkpoint_has_trainer_state(checkpoint_dir):
     return os.path.exists(os.path.join(checkpoint_dir, "trainer_state.json"))
 
 
-def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
-                                   output_dir: str):
-    """Collects the state dict and dump to disk."""
-    if getattr(trainer.args, "save_mm_vision_tower", False):
-        keys_to_match = ['vision_tower']
-        weight_to_save = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
-        trainer.model.config.save_pretrained(output_dir)
-        # 保存路径逻辑
-        current_folder = output_dir.split('/')[-1]
-        parent_folder = os.path.dirname(output_dir)
-        if trainer.args.local_rank == 0 or trainer.args.local_rank == -1:
-            if current_folder.startswith('checkpoint-'):
-                vision_folder = os.path.join(parent_folder, "vision_tower")
-                os.makedirs(vision_folder, exist_ok=True)
-                torch.save(weight_to_save, os.path.join(vision_folder, f'{current_folder}.bin'))
-            else:
-                torch.save(weight_to_save, os.path.join(output_dir, f'vision_tower.bin'))
-        # 这里是否return取决于你是否只保存视觉塔，通常可以继续执行下面的流程               
 
 
-    if getattr(trainer.args, "tune_mm_mlp_adapter", False):
-        # Only save Adapter
-        keys_to_match = ['mm_projector']
-        if getattr(trainer.args, "use_im_start_end", False):
-            keys_to_match.extend(['embed_tokens', 'embed_in'])
 
-        weight_to_save = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
-        trainer.model.config.save_pretrained(output_dir)
+def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
+    """
+    完整的、暴力可靠的权重保存函数。
+    逻辑：
+    1. 预训练阶段：自动抓取所有 requires_grad=True 的参数（含投影层和自定义融合层）。
+    2. SFT 阶段：调用官方逻辑保存全量模型。
+    """
+    
+    # 检查当前是否为“只练适配器”的预训练模式
+    is_pretraining = getattr(trainer.args, "tune_mm_mlp_adapter", False)
 
-        current_folder = output_dir.split('/')[-1]
-        parent_folder = os.path.dirname(output_dir)
-        if trainer.args.local_rank == 0 or trainer.args.local_rank == -1:
-            if current_folder.startswith('checkpoint-'):
-                mm_projector_folder = os.path.join(parent_folder, "mm_projector")
-                os.makedirs(mm_projector_folder, exist_ok=True)
-                torch.save(weight_to_save, os.path.join(mm_projector_folder, f'{current_folder}.bin'))
-            else:
-                torch.save(weight_to_save, os.path.join(output_dir, f'mm_projector.bin'))
+    # ==========================================================
+    # 场景 A: 预训练/对齐阶段 (只存增量参数)
+    # ==========================================================
+    if is_pretraining:
+        if trainer.args.local_rank <= 0:
+            print(f"\n[System] 启动暴力扫描保存模式...")
+
+        # 暴力扫描：直接搜寻模型中所有开启了梯度的参数
+        weight_to_save = {}
+        for name, param in trainer.model.named_parameters():
+            if param.requires_grad:
+                # 兼容 DeepSpeed Zero2/Zero3，确保拿到 CPU 上的数据
+                weight_to_save[name] = param.data.cpu()
+
+        # 主进程负责物理写入磁盘
+        if trainer.args.local_rank <= 0:
+            # 1. 保存模型配置 (config.json)
+            trainer.model.config.save_pretrained(output_dir)
+            
+            # 2. 保存增量权重 (mm_projector.bin)
+            save_path = os.path.join(output_dir, "mm_projector.bin")
+            torch.save(weight_to_save, save_path)
+            
+            # 3. 打印统计报告，确认是否漏掉 key
+            vt_count = sum(1 for k in weight_to_save.keys() if 'vision_tower' in k)
+            pj_count = sum(1 for k in weight_to_save.keys() if 'mm_projector' in k)
+            print(f"📊 保存报告:")
+            print(f"   - 总计保存键值: {len(weight_to_save)} 个")
+            print(f"   - 其中视觉融合层 (Vision Tower): {vt_count} 个")
+            print(f"   - 其中投影层 (Projector): {pj_count} 个")
+            print(f"✅ 成功！文件已存至: {save_path}\n")
+
+        # 预训练模式任务完成，直接返回，不再执行后续全量保存
         return
 
+    # ==========================================================
+    # 场景 B: 全量微调阶段 (SFT) 或 其它模式
+    # ==========================================================
+    
+    # 兼容用户可能需要的独立 Vision Tower 保存开关
+    if getattr(trainer.args, "save_mm_vision_tower", False):
+        # 即使在全量微调，也可以单独拎出一份视觉塔权重
+        vt_weights = {n: p.data.cpu() for n, p in trainer.model.named_parameters() if 'vision_tower' in n}
+        if trainer.args.local_rank <= 0:
+            torch.save(vt_weights, os.path.join(output_dir, 'vision_tower_standalone.bin'))
+
+    # 执行 HuggingFace 官方的全量保存逻辑（保存数 GB 的 pytorch_model.bin）
     if trainer.deepspeed:
         torch.cuda.synchronize()
         trainer.save_model(output_dir)
-        return
+    else:
+        state_dict = trainer.model.state_dict()
+        if trainer.args.should_save:
+            cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
+            del state_dict
+            trainer._save(output_dir, state_dict=cpu_state_dict)
 
-    state_dict = trainer.model.state_dict()
-    if trainer.args.should_save:
-        cpu_state_dict = {
-            key: value.cpu()
-            for key, value in state_dict.items()
-        }
-        del state_dict
-        trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
 
 
 def train():
@@ -424,6 +442,16 @@ def train():
         model.requires_grad_(False)
         for p in model.get_model().mm_projector.parameters():
             p.requires_grad = True
+        rank0_print("🔥 [Custom] Unfreezing AdaptiveConcatenationVisionTower fusion layers...")
+        if hasattr(model.get_model(), "vision_tower"):
+            print("🔥 Unfreezing custom fusion layers in Vision Tower...")
+            for name, p in model.get_model().vision_tower.named_parameters():
+                # 匹配你在 AdaptiveConcatenationVisionTower 中定义的那些层名
+                if any(k in name for k in ['mlp_layers', 'cross_attn', 'cls_weights', 'pseudo']):
+                    p.requires_grad = True
+                    print(f"   -> Unfrozen: {name}")
+
+
 
     model.config.freeze_mm_mlp_adapter = training_args.freeze_mm_mlp_adapter
     if training_args.freeze_mm_mlp_adapter:
@@ -498,6 +526,35 @@ def train():
                            tokenizer=tokenizer,
                            args=training_args,
                            **data_module)
+    
+
+    if training_args.local_rank == 0 or training_args.local_rank == -1:
+        rank0_print("\n" + "="*50)
+        rank0_print("🔍 [Parameter Check] 正在扫描可训练参数...")
+        
+        trainable_params = []
+        for name, p in model.named_parameters():
+            if p.requires_grad:
+                trainable_params.append(name)
+                # 打印前几个 key 看看路径对不对
+                if len(trainable_params) <= 10:
+                    rank0_print(f"   ✅ 可训练: {name}")
+        
+        rank0_print(f"...\n   总计可训练参数项: {len(trainable_params)}")
+        
+        # 特别检查你的创新点是否在列表里
+        fusion_found = any('vision_tower' in n for n in trainable_params)
+        projector_found = any('mm_projector' in n for n in trainable_params)
+        
+        if fusion_found and projector_found:
+            rank0_print("🚀 状态确认：混合编码器融合层 和 Projector 已全部解冻！")
+        else:
+            if not fusion_found:
+                rank0_print("❌ 警告：未发现 vision_tower 的可训练参数，请检查解冻逻辑！")
+            if not projector_found:
+                rank0_print("❌ 警告：未发现 mm_projector 的可训练参数！")
+        
+        rank0_print("="*50 + "\n")
 
 # ==================== 🔍 更加稳健的自检 Debug 代码 ====================
     if training_args.local_rank == 0 or training_args.local_rank == -1:

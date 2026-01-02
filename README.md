@@ -245,3 +245,57 @@ MME 跑完后会生成一个大 JSONL。你还需要运行 MME 官方的脚本�
 转换格式：运行 convert_answer_to_mme.py。
 
 计算分数：运行 calculation_mme.py。
+
+
+
+我们修改了预训练时候，要将混合编码器中除了子编码器之外的跨塔注意力模块以及伪cls模块全部导出和合并在投影层中的代码
+
+例如在config.json加入对vision_tower_dino和vision_tower_oryx模型的引用
+(base) huangwei@ecs-53704537-002:/mnt/CoBunny/checkpoints-pretrain/bunny-phi1.5-mixed-pretrain-v2/checkpoint-100$ cat config.json 
+{
+  "architectures": [
+    "PhiForCausalLM"
+  ],
+  "attention_dropout": 0.0,
+  "bos_token_id": 50256,
+  "dtype": "float32",
+  "embd_pdrop": 0.0,
+  "eos_token_id": 50256,
+  "freeze_mm_mlp_adapter": false,
+  "hidden_act": "gelu_new",
+  "hidden_size": 2048,
+  "image_aspect_ratio": null,
+  "initializer_range": 0.02,
+  "intermediate_size": 8192,
+  "layer_norm_eps": 1e-05,
+  "max_position_embeddings": 2048,
+  "mm_hidden_size": 1024,
+  "mm_projector_lr": null,
+  "mm_projector_type": "mlp2x_gelu",
+  "mm_resampler_type": null,
+  "mm_vision_select_feature": "patch",
+  "mm_vision_select_layer": -1,
+  "mm_vision_tower": "mixedencoder",
+  "model_type": "bunny-phi",
+  "vision_tower_dino": "/mnt/facebook/dinov3-convnext-large-pretrain-lvd1689m", 
+  "vision_tower_oryx": "oryx_vit:/mnt/THUdyhOryx-ViT/oryx_vit.pth",    
+  "num_attention_heads": 32,
+  "num_hidden_layers": 24,
+  "num_key_value_heads": 32,
+  "pad_token_id": 50256,
+  "partial_rotary_factor": 0.5,
+  "qk_layernorm": false,
+  "resid_pdrop": 0.0,
+  "rope_scaling": null,
+  "rope_theta": 10000.0,
+  "tie_word_embeddings": false,
+  "tokenizer_model_max_length": 2048,
+  "tokenizer_padding_side": "right",
+  "transformers_version": "4.57.1",
+  "tune_mm_mlp_adapter": true,
+  "unfreeze_vision_tower": false,
+  "use_cache": false,
+  "use_mm_proj": true,
+  "use_s2": false,
+  "vocab_size": 51200
+}

@@ -36,6 +36,11 @@ class BunnyPhiForCausalLM(PhiForCausalLM, BunnyMetaForCausalLM):
     def get_model(self):
         return self.model
 
+    # 5. 【手动桥接】确保 get_vision_tower 能直接被找到
+    def get_vision_tower(self):
+        return self.get_model().get_vision_tower()
+
+
     def forward(
             self,
             input_ids: torch.LongTensor = None,

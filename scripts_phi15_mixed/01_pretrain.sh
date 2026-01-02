@@ -13,7 +13,7 @@
 MASTER_ADDR=${MASTER_ADDR:-"192.168.0.3"}
 MASTER_PORT=${MASTER_PORT:-"29501"}
 HOSTFILE="./script/deepspeed/hostfile"
-
+INCLUDE_STR="192.168.0.3:0,1,2,3,4,5,6,7@192.168.0.2:1,2,3,4,5,6,7"
 # ========================================================
 # 2. 模型与架构参数
 # ========================================================
@@ -22,14 +22,21 @@ BASE_MODEL="/mnt/conda_data/microsoft/phi-1_5"
 # 关键：这里传你代码中定义的逻辑开关名称
 VISION_TOWER="mixedencoder" 
 OUTPUT_DIR="./checkpoints-pretrain/bunny-phi1.5-mixed-pretrain"
-
 mkdir -p $OUTPUT_DIR
+export PYTHONUNBUFFERED=1
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+export DS_SKIP_CUDA_CHECK=1
+export DEEPSPEED_USE_TORCH_ADAM=1
+export NCCL_DEBUG=INFO  # 开启调试模式，这样卡住时能看到为什么卡
+export NCCL_SOCKET_IFNAME=eth0 
+export GLOO_SOCKET_IFNAME=eth0
 # ========================================================
 # 3. 启动训练 (使用 DeepSpeed)
 # ========================================================
 # 注意：Pretrain 阶段通常建议使用 Zero-2 性能更佳，显存极度紧张才用 Zero-3
 deepspeed \
     --hostfile $HOSTFILE \
+    --include "$INCLUDE_STR" \
     --master_addr $MASTER_ADDR \
     --master_port $MASTER_PORT \
     bunny/train/train.py \
@@ -51,14 +58,19 @@ deepspeed \
     --num_train_epochs 1 \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 8 \
+    --gradient_accumulation_steps 1 \
     --eval_strategy "steps" \
-    --eval_steps 500 \
+    --eval_steps 10000 \
     --save_strategy "steps" \
-    --save_steps 500 \
+    --save_steps 10000 \
     --save_total_limit 3 \
+    --load_best_model_at_end True \
     --learning_rate 1e-3 \
+    --lr_scheduler_type  "cosine"\
+    --warmup_ratio 0.03  \
     --load_best_model_at_end True \
     --metric_for_best_model "loss" \
     --greater_is_better False \
+    --model_max_length 2048 \
+    --gradient_checkpointing True \
     --report_to none 2>&1 | tee $OUTPUT_DIR/pretrain.log
