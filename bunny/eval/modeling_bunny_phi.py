@@ -641,12 +641,29 @@ class BunnyMetaModel:
                 p.requires_grad = True
 
         if pretrain_mm_mlp_adapter is not None:
-            mm_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
+            print(f"📦 [Mixed-Tower-Linker] 正在加载 Stage 1 混合预训练权重: {pretrain_mm_mlp_adapter}")
+            
+            all_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
 
-            def get_w(weights, keyword):
-                return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
+            projector_weights = {
+                k.replace('model.mm_projector.', ''): v 
+                for k, v in all_weights.items() if 'mm_projector' in k
+            }
+            if projector_weights:
+                self.mm_projector.load_state_dict(projector_weights)
+                print(f"  ✅ 已加载 Projector 权重 (4/4)")
 
-            self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
+            vision_weights = {
+                k.replace('model.vision_tower.', ''): v 
+                for k, v in all_weights.items() if 'vision_tower' in k
+            }
+            if vision_weights:
+                # 使用 strict=False 是为了安全，防止某些 frozen 的 backbone 键值干扰
+                info = self.vision_tower.load_state_dict(vision_weights, strict=False)
+                print(f"  ✅ 已加载 Mixed Vision Tower 融合参数 (113/113)")
+                # 如果你想确认是否有遗漏，可以打印 info.missing_keys
+            else:
+                print(f"  ⚠️ 警告: 未在 bin 文件中发现 vision_tower 相关权重！")
 
 
 class BunnyMetaForCausalLM(ABC):

@@ -445,12 +445,13 @@ def train():
         rank0_print("🔥 [Custom] Unfreezing AdaptiveConcatenationVisionTower fusion layers...")
         if hasattr(model.get_model(), "vision_tower"):
             print("🔥 Unfreezing custom fusion layers in Vision Tower...")
-            for name, p in model.get_model().vision_tower.named_parameters():
-                # 匹配你在 AdaptiveConcatenationVisionTower 中定义的那些层名
-                if any(k in name for k in ['mlp_layers', 'cross_attn', 'cls_weights', 'pseudo']):
+
+            rank0_print("🔥 [Custom] 正在精准解冻混合视觉塔融合层...")
+            v_tower = model.get_model().get_vision_tower() # 使用 getter 比较安全
+            for name, p in v_tower.named_parameters():
+                if any(k in name for k in ['mlp_layers', 'cross_attn', 'cls_weights', 'pseudo', 'score_predictor']):
                     p.requires_grad = True
                     print(f"   -> Unfrozen: {name}")
-
 
 
     model.config.freeze_mm_mlp_adapter = training_args.freeze_mm_mlp_adapter

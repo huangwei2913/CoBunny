@@ -26,7 +26,7 @@ def test_inference():
     disable_torch_init()
 
     # --- 1. 路径设置 ---
-    checkpoint_path = '/mnt/CoBunny/checkpoints-pretrain/bunny-phi1.5-mixed-pretrain-v2/checkpoint-100'
+    checkpoint_path = '/mnt/CoBunny/checkpoints-pretrain/bunny-phi1.5-mixed-pretrain/checkpoint-33300'
     base_llm_path = '/mnt/conda_data/microsoft/phi-1_5' 
     dino_path = "/mnt/facebook/dinov3-convnext-large-pretrain-lvd1689m"
     oryx_path = "oryx_vit:/mnt/THUdyhOryx-ViT/oryx_vit.pth"    
