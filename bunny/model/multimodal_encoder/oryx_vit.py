@@ -883,7 +883,7 @@ class OryxViTWrapper(nn.Module):
 
     def _forward(self, images):
         # 确保数据在正确的设备和精度上
-        images = images.to(device=self.device, dtype=self.dtype)
+        images = images.to(device=self.device, dtype=torch.float16)
         
         # 提取中间层
         all_layer_outputs = self.vision_tower.get_intermediate_layers(

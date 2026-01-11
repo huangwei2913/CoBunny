@@ -98,7 +98,7 @@ class DinoVisionTower(BaseVisionTower):
         self.vision_tower = load_dinov3_model(self.model_name, self.pretrained_path)
         
         # 转移到正确的设备和精度
-        self.vision_tower.to(device=self.device, dtype=self.dtype)
+        self.vision_tower.to(device=self.device, dtype=torch.float16)
         
         # 冻结或解冻
         self.vision_tower.requires_grad_(self.unfreeze_mm_vision_tower)
@@ -112,7 +112,7 @@ class DinoVisionTower(BaseVisionTower):
         # 确保输入精度一致
         images = images.to(device=self.device, dtype=self.dtype)
         
-        with torch.autocast("cuda", torch.bfloat16):
+        with torch.autocast("cuda", torch.float16):
             with torch.no_grad():
                 # 获取 4 层中间层特征 (List of Tuple: (feat, cls))
                 all_layers = self.vision_tower.get_intermediate_layers(
