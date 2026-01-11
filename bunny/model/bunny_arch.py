@@ -20,7 +20,7 @@ class BunnyMetaModel:
         vision_tower = getattr(self, 'vision_tower', None)  #这只是从self对象拿到vision_tower属性（模型对象），如果是list则取第一个，否则原样返回
         if type(vision_tower) is list:
             vision_tower = vision_tower[0]
-        return vision_tower
+        return vision_tower # 也就说我们的双塔视觉编码器返回的是自己本身
     def initialize_vision_modules(self, model_args):
         vision_tower = model_args.vision_tower
         #这个地方传递进了模型的视觉塔名称，我们要在这里加入
@@ -78,8 +78,19 @@ class BunnyMetaForCausalLM(ABC):
         return self.get_model().get_vision_tower()
     def encode_images(self, images):
         #这里可以来控制,如果不是dynamic 
+        vision_tower = self.get_model().get_vision_tower()
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        if "AdaptiveConcatenationVisionTower" in str(type(vision_tower)):
+   
+            image_features, _ = vision_tower(images)
+   
+            image_features = self.get_model().mm_projector(image_features)
+          
+            return image_features
         mm_resampler_type = getattr(self.config, 'mm_resampler_type', None)
+
         if mm_resampler_type is None:  # 常规处理模式, 这里我们希望的
+
             image_features, _ = self.get_model().get_vision_tower()(images)  #这里是希望能返回中间层特征
             image_features = self.get_model().mm_projector(image_features)
             return image_features
@@ -94,6 +105,8 @@ class BunnyMetaForCausalLM(ABC):
                 image_features = self.get_model().vision_resampler(image_features)
                 image_features = self.get_model().mm_projector(image_features)
                 return image_features    
+            
+
     # 也就说这个地方可以加入一个专家混合（MOE）层，这个层负责更加合理地融合来自多个视觉编码器的不同视觉特征
     def prepare_inputs_labels_for_multimodal(
             self, input_ids, position_ids, attention_mask, past_key_values, labels, images
@@ -234,4 +247,23 @@ class BunnyMetaForCausalLM(ABC):
             attention_mask = attention_mask.to(dtype=_attention_mask.dtype)
         if _position_ids is None:
             position_ids = None
+        
+        # 在 return 之前加入以下代码
+        if new_input_embeds is not None and new_labels is not None:
+        # 验证点 1：长度一致性
+            assert new_input_embeds.shape[1] == new_labels.shape[1], "致命错误：Embeds 和 Labels 长度不一致！"
+
+        # 验证点 2：图像占位检查
+        # 图像区域对应的 Labels 必须全部是 -100
+        # 我们可以找出一个 batch，看看里面 -100 的分布
+            num_ignore = (new_labels[0] == -100).sum().item()
+            #print(f"DEBUG: [Final Check] Total length: {new_labels.shape[1]}, Ignore tokens: {num_ignore}")
+
+        # 验证点 3：检查是否有“有效答案”残留
+        # 如果有效 token 数量太少，说明大部分内容被 truncate 切掉了
+            valid_tokens = (new_labels[0] != -100).sum().item()
+            #if valid_tokens < 5:
+                #print(f"⚠️ 警告：当前样本有效 Token 仅为 {valid_tokens}，可能由于 truncate_max_length 过短导致答案被切除！")
+
+
         return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels

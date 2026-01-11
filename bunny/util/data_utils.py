@@ -18,6 +18,11 @@ from bunny.util.mm_utils import tokenizer_image_token
 from PIL import Image
 
 
+import torch
+def rank0_print(*args):
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        print(*args)
+
 @dataclass
 class DataArguments:
     data_path: str = field(default=None, metadata={"help": "Path to the training data."})
@@ -426,13 +431,53 @@ class LazySupervisedDataset(Dataset):
                  tokenizer: transformers.PreTrainedTokenizer,
                  data_args: DataArguments):
         super(LazySupervisedDataset, self).__init__()
-        print("the data path is ........................................",data_path)
+        
+        # 1. 先读数据
+        rank0_print(f"Loading data from {data_path}...")
         list_data_dict = json.load(open(data_path, "r"))
+        
+        # 2. 【关键修复】先赋值给一个局部变量，或者先完成 self 的赋值
+        orig_len = len(list_data_dict)
+        rank0_print(f"原始数据总量: {orig_len}")
 
-        print("Formatting inputs...Skip in lazy mode")
+        # 3. 设置参数
         self.tokenizer = tokenizer
-        self.list_data_dict = list_data_dict
         self.data_args = data_args
+        
+        # 4. 过滤逻辑
+        NUM_IMAGE_TOKENS = 289  # K=8 时的影像特征长度
+        MAX_SEQ_LEN = tokenizer.model_max_length if tokenizer.model_max_length < 5000 else 2048
+        
+        filtered_data = []
+        num_discarded = 0
+
+        # 如果数据量巨大（如 > 50万条），建议打印进度
+        rank0_print("正在进行长度过滤，请稍候...")
+
+        for entry in list_data_dict:
+            # 简单估算：拼接对话文本
+            full_text = ""
+            for conv in entry['conversations']:
+                full_text += conv['value']
+            
+            # 性能平衡：如果数据集极大，tokenizer.encode 会非常慢
+            # 这里先用字符长度快速初筛，字符长度 < 2000 的通常都没问题 (1 token 约等于 3-4 字符)
+            if len(full_text) < 3000:
+                filtered_data.append(entry)
+                continue
+
+            # 只有长的才进真正的 tokenizer 检查
+            text_len = len(tokenizer.encode(full_text, add_special_tokens=True))
+            
+            if (text_len + NUM_IMAGE_TOKENS) > (MAX_SEQ_LEN - 10): 
+                num_discarded += 1
+                continue
+            
+            filtered_data.append(entry)
+            
+        # 5. 最后统一赋值
+        self.list_data_dict = filtered_data
+        rank0_print(f"✅ 长度过滤完成！丢弃了 {num_discarded} 条超长样本。剩余: {len(self.list_data_dict)}")
 
     def __len__(self):
         return len(self.list_data_dict)

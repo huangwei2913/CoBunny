@@ -50,7 +50,7 @@ class ModelArguments:
     mm_dense_connector_type: Optional[str] = field(default='dci')  #密集投影层类型
     vision_tower_dino: Optional[str] = field(default=None, metadata={"help": "DINOv2 子塔的权重路径"})
     vision_tower_oryx: Optional[str] = field(default=None, metadata={"help": "Oryx/SigLIP 子塔的权重路径"})
-    compression_K: int = field(default=4, metadata={"help": "ToMe 算法的压缩倍率"})
+    compression_K: int = field(default=8, metadata={"help": "ToMe 算法的压缩倍率"})
     mm_hidden_size: int = field(default=1024)
 
 

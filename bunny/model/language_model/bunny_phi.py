@@ -56,7 +56,7 @@ class BunnyPhiForCausalLM(PhiForCausalLM, BunnyMetaForCausalLM, GenerationMixin)
             return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
-        # 1. 预处理，确保多模态数据对齐
+        # 1. 预处理
         if inputs_embeds is None:
             (
                 input_ids,
@@ -74,7 +74,8 @@ class BunnyPhiForCausalLM(PhiForCausalLM, BunnyMetaForCausalLM, GenerationMixin)
                 images
             )
 
-        # --- 🚀 终极手动修复逻辑 ---
+        # ... (你关于 KV Cache 的处理逻辑保持不变) ...
+            # --- 🚀 终极手动修复逻辑 ---
         # 如果存在 KV Cache (past_key_values)，我们需要确保 Mask 的长度是 [当前输入 + 历史缓存]
         if past_key_values is not None and inputs_embeds is not None:
             # 获取已经缓存的 Token 数量
@@ -96,8 +97,8 @@ class BunnyPhiForCausalLM(PhiForCausalLM, BunnyMetaForCausalLM, GenerationMixin)
                 cache_length, total_length, dtype=torch.long, device=inputs_embeds.device
             ).unsqueeze(0).repeat(inputs_embeds.shape[0], 1)
 
-        # 2. 🔥【核心改动】跳过父类的 forward，直接调用内部模型
-        # 这样可以避开 super().forward 内部那个会崩溃的 _prepare_4d 逻辑
+        print(f"DEBUG: Final inputs_embeds shape...............................: {inputs_embeds.shape}")
+        # 2. 调用内部模型
         outputs = self.model(
             input_ids=None,
             attention_mask=attention_mask,
@@ -110,12 +111,37 @@ class BunnyPhiForCausalLM(PhiForCausalLM, BunnyMetaForCausalLM, GenerationMixin)
             return_dict=return_dict
         )
 
-        # 3. 手动获取最后一层的隐藏状态并映射到 logits
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
 
+        # --- 🚀 核心修复：计算 Loss ---
+        loss = None
+        if labels is not None:
+            
+            #print(f"DEBUG: Initial labels snippet: {labels[0, :50].tolist()}")    
+            #print(f"DEBUG: Sequence END labels.............: {labels[0, -10:].tolist()}")
+
+            # 将 logits 移位以匹配 labels (Causal LM 标准操作)
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
+            num_valid_labels = (shift_labels != -100).sum().item()
+            #print(f"DEBUG: Valid tokens in this batch: {num_valid_labels}")
+            #print(f"DEBUG: First 10 shift_labels: {shift_labels.view(-1)[:10]}")           
+            # 展平进行计算
+            loss_fct = torch.nn.CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, self.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            
+            # 确保在同一设备上
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+            if torch.distributed.get_rank() == 0: # 只让 0 号卡打印，避免刷屏
+                print(f"🔥🔥🔥 [REAL-TIME CHECK] Step Loss: {loss.item():.4f}")
+        # 3. 返回时带上计算好的 loss
         return CausalLMOutputWithPast(
-            loss=None,
+            loss=loss,  # <--- 现在不再是 None 了！
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
