@@ -211,37 +211,48 @@ class BunnyTrainer(Trainer):
         return self.optimizer
 
     def _save_checkpoint(self, model, trial, metrics=None):
-        """
-        覆盖原有的 Checkpoint 保存逻辑：
-        如果 tune_mm_mlp_adapter=True，则执行“暴力扫描”保存所有 requires_grad=True 的参数。
-        """
+        # 1. 先调用父类方法，这会尝试保存 trainer_state.json 等基础信息
+        super()._save_checkpoint(model, trial)
+
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
             checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
-
             run_dir = self._get_output_dir(trial=trial)
             output_dir = os.path.join(run_dir, checkpoint_folder)
-            os.makedirs(output_dir, exist_ok=True)
 
-            # ==========================================================
-            # 暴力扫描逻辑：不再依赖 keys_to_match 字符串匹配
-            # ==========================================================
-            weight_to_save = {}
+            # --- 分流保存逻辑 ---
+            lora_state_dict = {}
+            projector_state_dict = {}
+            
+            # 遍历所有需要训练的参数
             for name, param in self.model.named_parameters():
                 if param.requires_grad:
-                    # 确保提取 CPU 上的权重数值
-                    weight_to_save[name] = param.data.cpu()
+                    param_cpu = param.data.cpu()
+                    # 属于 LoRA 的权重
+                    if "lora_" in name:
+                        lora_state_dict[name] = param_cpu
+                    # 属于 Projector 或 融合层 的权重
+                    elif "mm_projector" in name or "vision_tower" in name:
+                        projector_state_dict[name] = param_cpu
 
             if self.args.local_rank <= 0:
-                # 保存配置
-                self.model.config.save_pretrained(output_dir)
-                # 保存增量权重
-                save_path = os.path.join(output_dir, 'mm_projector.bin')
-                torch.save(weight_to_save, save_path)
+                os.makedirs(output_dir, exist_ok=True)
                 
-                print(f"\n🔥 [Custom Checkpoint] Step {self.state.global_step}: Saved {len(weight_to_save)} trainable parameters to {save_path}")
-        else:
-            super(BunnyTrainer, self)._save_checkpoint(model, trial, metrics)
+                # A. 保存标准 LoRA 权重文件
+                if len(lora_state_dict) > 0:
+                    # 使用 PEFT 约定的文件名
+                    lora_save_path = os.path.join(output_dir, 'adapter_model.bin')
+                    torch.save(lora_state_dict, lora_save_path)
+                    # 同时保存配置文件（如果存在）
+                    if hasattr(self.model, "peft_config"):
+                        self.model.peft_config['default'].save_pretrained(output_dir)
+                    print(f"✅ 已保存标准 LoRA 权重 ({len(lora_state_dict)} keys)")
+
+                # B. 保存标准的 mm_projector 权重文件
+                if len(projector_state_dict) > 0:
+                    projector_save_path = os.path.join(output_dir, 'mm_projector.bin')
+                    torch.save(projector_state_dict, projector_save_path)
+                    print(f"✅ 已保存 Projector/Fusion 权重 ({len(projector_state_dict)} keys)")
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         """

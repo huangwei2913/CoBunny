@@ -51,7 +51,17 @@ OUTPUT_DIR="./checkpoints-finetune/bunny-phi1.5-mixed-lora-695k"
 
 # 关键：指向 Stage 1 跑出来的那个包含 117 个 Key 的文件
 PRETRAIN_ADAPTER="./checkpoints-pretrain/bunny-phi1.5-mixed-pretrain/mm_projector.bin"
-
+export PYTHONUNBUFFERED=1
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+export DS_SKIP_CUDA_CHECK=1
+export DEEPSPEED_USE_TORCH_ADAM=1
+export NCCL_DEBUG=INFO  # 开启调试模式，这样卡住时能看到为什么卡
+export NCCL_SOCKET_IFNAME=eth0 
+export GLOO_SOCKET_IFNAME=eth0
+export NCCL_BLOCKING_WAIT=1
+export NCCL_TIMEOUT=9600
+export NCCL_ASYNC_ERROR_HANDLING=1
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512"
 # ========================================================
 # 3. 启动训练 (Stage 2: Instruction Tuning)
 # ========================================================
@@ -64,7 +74,7 @@ deepspeed \
     --master_addr $MASTER_ADDR \
     --master_port $MASTER_PORT \
     bunny/train/train.py \
-    --deepspeed ./script/deepspeed/zero2_mixencoders_pretraing.json \
+    --deepspeed ./script/deepspeed/zero2_mixencoders_finetune.json \
     --model_name_or_path $BASE_MODEL \
     --model_type $MODEL_TYPE \
     --version bunny \
@@ -76,8 +86,6 @@ deepspeed \
     --pretrain_mm_mlp_adapter $PRETRAIN_ADAPTER \
     --mm_projector_type mlp2x_gelu \
     --tune_mm_mlp_adapter True \
-    --freeze_vision_tower True \
-    --freeze_backbone True \
     --lora_enable True \
     --lora_r 128 \
     --lora_alpha 256 \
@@ -90,15 +98,15 @@ deepspeed \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 4 \
-    --evaluation_strategy "no" \
+    --eval_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 5000 \
-    --save_total_limit 2 \
+    --save_steps 2000 \
+    --save_total_limit 10 \
     --learning_rate 2e-4 \
     --weight_decay 0. \
-    --warmup_ratio 0.1 \
+    --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
-    --logging_steps 1 \
+    --logging_steps 10 \
     --model_max_length 2048 \
     --gradient_checkpointing True \
     --dataloader_num_workers 8 \

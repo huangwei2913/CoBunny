@@ -29,7 +29,7 @@ def test_inference():
     checkpoint_path = '/mnt/CoBunny/checkpoints-pretrain/bunny-phi1.5-mixed-pretrain/checkpoint-33300'
     base_llm_path = '/mnt/conda_data/microsoft/phi-1_5' 
     dino_path = "/mnt/facebook/dinov3-convnext-large-pretrain-lvd1689m"
-    oryx_path = "oryx_vit:/mnt/THUdyhOryx-ViT/oryx_vit.pth"    
+    oryx_path = "oryx_vit:/mnt/THUdyhOryx-ViT/oryx_vit.pth"      #要特别注意的是，我们应该修改配置文件，这里是手动的，以后会变成自动的
     model_name = 'bunny-phi-1.5'
     model_type = 'phi-1.5'
 

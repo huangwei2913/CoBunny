@@ -205,12 +205,6 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
             # 3. 打印统计报告，确认是否漏掉 key
             vt_count = sum(1 for k in weight_to_save.keys() if 'vision_tower' in k)
             pj_count = sum(1 for k in weight_to_save.keys() if 'mm_projector' in k)
-            print(f"📊 保存报告:")
-            print(f"   - 总计保存键值: {len(weight_to_save)} 个")
-            print(f"   - 其中视觉融合层 (Vision Tower): {vt_count} 个")
-            print(f"   - 其中投影层 (Projector): {pj_count} 个")
-            print(f"✅ 成功！文件已存至: {save_path}\n")
-
         # 预训练模式任务完成，直接返回，不再执行后续全量保存
         return
 
@@ -377,6 +371,18 @@ def train():
                 model.to(torch.float16)
         rank0_print("Adding LoRA adapters...")
         model = get_peft_model(model, lora_config)
+        # ---------------------------------------------------------
+        # 🌟 关键加固：强制激活 LoRA 层梯度
+        # ---------------------------------------------------------
+        for name, param in model.named_parameters():
+            if "lora_" in name:
+                param.requires_grad = True # 确保 LoRA 层必开
+            elif "mm_projector" in name:
+                param.requires_grad = True # 确保投影层也必开
+        # ---------------------------------------------------------
+
+        # 打印一下，验证给学术论文看
+        model.print_trainable_parameters()       
 
 
     #这段代码的作用正是为加载的大语言模型（LLM）选择对应的对话（聊天）模板
@@ -439,7 +445,13 @@ def train():
     #的主要作用是实现微调时只训练模型中视觉多模态MLP适配器（mm_projector）部分，而冻结模型其余参数。具体含义说明如下
     model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
     if model_args.tune_mm_mlp_adapter:
-        model.requires_grad_(False)
+        if not training_args.lora_enable:
+            print("❄️ [System] 全量冻结 Backbone，仅练 Projector...")
+            model.requires_grad_(False)
+        else:
+            print("🚀 [System] 检测到 LoRA 已开启，仅冻结非 LoRA 的 LLM 权重...")
+            # 这种情况下不需要 model.requires_grad_(False)，因为 get_peft_model 内部已经处理好了
+            pass
         for p in model.get_model().mm_projector.parameters():
             p.requires_grad = True
         rank0_print("🔥 [Custom] Unfreezing AdaptiveConcatenationVisionTower fusion layers...")
