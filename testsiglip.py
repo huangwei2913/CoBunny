@@ -7,7 +7,7 @@ image = load_image(url)
 
 
 
-model_name = "/home/huangwei/siglip-so400m-patch14-384"
+model_name = "/mnt/siglip-so400m-patch14-384"
 processor = SiglipImageProcessor.from_pretrained(model_name)
 model = SiglipVisionModel.from_pretrained(model_name)
 model.eval()

@@ -36,6 +36,7 @@ bunny/model/language_model/bunny_stablelm.py
 bunny/model/language_model/changepybintosafe.py
 bunny/model/language_model/checklorabinweights.py
 bunny/model/language_model/stage1pre.py
+bunny/model/language_model/stage2finedtunedwithlora.py
 bunny/model/language_model/stage2finetuned.py
 bunny/model/language_model/stage2modifyied.py
 bunny/model/language_model/test.py
@@ -95,6 +96,7 @@ bunny/util/s2wrapper/__init__.py
 bunny/util/s2wrapper/core.py
 bunny/util/s2wrapper/utils.py
 checkpoints-finetune/bestloracheckpoint/zero_to_fp32.py
+checkpoints-finetune/checkpoint-20_bak/zero_to_fp32.py
 checkpoints-pretrain/oryx_phi/find_min_loss.py
 checkpoints-pretrain/oryx_phi/jb.py
 checkpoints-pretrain/oryx_phi/rb.py
@@ -172,3 +174,4 @@ eval/vqav2/convert_vqav2_for_submission.py
 eval/vqav2/vqav2_builder.py
 script/batch_inference.py
 script/merge_lora_weights.py
+tmpo2ivf29_/_remote_module_non_scriptable.py

@@ -613,7 +613,7 @@ class BunnyMetaModel:
         vision_tower = getattr(self, 'vision_tower', None)
         if type(vision_tower) is list:
             vision_tower = vision_tower[0]
-        return vision_tower
+        return vision_tower             #如果是混合编码器就是返回的这个
 
     def initialize_vision_modules(self, model_args):
         vision_tower = model_args.vision_tower

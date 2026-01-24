@@ -77,8 +77,8 @@ deepspeed \
     --model_name_or_path $BASE_MODEL \
     --model_type $MODEL_TYPE \
     --version bunny \
-    --data_path /mnt/conda_data/Bunny-v1.1-data/finetune/bunny_high_quality_final.json \
-    --image_folder /mnt/conda_data/Bunny-v1.1-data/finetune/images \
+    --data_path /data/ShareGPT4V/sharegpt4v_matched_772k.json \
+    --image_folder /data/ShareGPT4V/images \
     --vision_tower mixedencoder \
     --vision_tower_dino /mnt/facebook/dinov3-convnext-large-pretrain-lvd1689m \
     --vision_tower_siglip /mnt/siglip-so400m-patch14-384 \
@@ -113,4 +113,4 @@ deepspeed \
     --gradient_checkpointing True \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \
-    --report_to none 2>&1 | tee $OUTPUT_DIR/finetune.log
+    --report_to none 2>&1 | tee $OUTPUT_DIR/finetunesharegpt.log

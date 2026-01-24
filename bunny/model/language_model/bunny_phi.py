@@ -97,7 +97,7 @@ class BunnyPhiForCausalLM(PhiForCausalLM, BunnyMetaForCausalLM, GenerationMixin)
                 cache_length, total_length, dtype=torch.long, device=inputs_embeds.device
             ).unsqueeze(0).repeat(inputs_embeds.shape[0], 1)
 
-        print(f"DEBUG: Final inputs_embeds shape...............................: {inputs_embeds.shape}")
+        #print(f"DEBUG: Final inputs_embeds shape...............................: {inputs_embeds.shape}")
         # 2. 调用内部模型
         outputs = self.model(
             input_ids=None,
@@ -137,8 +137,8 @@ class BunnyPhiForCausalLM(PhiForCausalLM, BunnyMetaForCausalLM, GenerationMixin)
             # 确保在同一设备上
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
-            if torch.distributed.get_rank() == 0: # 只让 0 号卡打印，避免刷屏
-                print(f"🔥🔥🔥 [REAL-TIME CHECK] Step Loss: {loss.item():.4f}")
+            #if torch.distributed.get_rank() == 0: # 只让 0 号卡打印，避免刷屏
+                #print(f"🔥🔥🔥 [REAL-TIME CHECK] Step Loss: {loss.item():.4f}")
         # 3. 返回时带上计算好的 loss
         return CausalLMOutputWithPast(
             loss=loss,  # <--- 现在不再是 None 了！

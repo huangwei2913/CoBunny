@@ -13,7 +13,7 @@
 MASTER_ADDR=${MASTER_ADDR:-"192.168.0.3"}
 MASTER_PORT=${MASTER_PORT:-"29501"}
 HOSTFILE="./script/deepspeed/hostfile"
-INCLUDE_STR="192.168.0.3:0,1,2,3,4,5,6,7@192.168.0.2:1,2,3,4,5,6,7"
+INCLUDE_STR="192.168.0.3:0,1,2,3,4,5,6,7@192.168.0.2:2,3,4,5,6,7"
 # ========================================================
 # 2. 模型与架构参数
 # ========================================================
@@ -46,7 +46,7 @@ deepspeed \
     --version plain \
     --vision_tower $VISION_TOWER \
     --vision_tower_dino /mnt/facebook/dinov3-convnext-large-pretrain-lvd1689m \
-    --vision_tower_oryx oryx_vit:/mnt/THUdyhOryx-ViT/oryx_vit.pth \
+    --vision_tower_siglip /mnt/siglip-so400m-patch14-384 \
     --data_path /mnt/conda_data/Bunny-v1.1-data/pretrain/bunny_pretrain_laion_2m.json \
     --image_folder /mnt/conda_data/Bunny-v1.1-data/pretrain/images \
     --mm_projector_type mlp2x_gelu \
@@ -60,13 +60,15 @@ deepspeed \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 4 \
     --eval_strategy "steps" \
-    --eval_steps 10000 \
+    --eval_steps 5000 \
     --save_strategy "steps" \
-    --save_steps 10000 \
+    --save_steps 5000 \
     --save_total_limit 3 \
     --load_best_model_at_end True \
-    --learning_rate 5e-4 \
+    --learning_rate 2e-4 \
+    --max_grad_norm 0.5 \
     --lr_scheduler_type  "cosine"\
+    --logging_steps 20 \
     --warmup_ratio 0.1  \
     --load_best_model_at_end True \
     --metric_for_best_model "loss" \

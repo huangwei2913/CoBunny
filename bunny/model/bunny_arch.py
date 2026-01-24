@@ -4,6 +4,7 @@ from .multimodal_encoder.builder import build_vision_tower
 from .multimodal_resampler.builder import build_vision_resampler
 from .multimodal_projector.builder import build_vision_projector
 from bunny.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX
+import os
 #直接强制选择这个indeity投影，直接在这个里面，在增加一个开源的openvision2的编码器，并初始化装载
 class BunnyMetaModel:
     def __init__(self, config):
@@ -26,7 +27,7 @@ class BunnyMetaModel:
         #这个地方传递进了模型的视觉塔名称，我们要在这里加入
         mm_vision_select_layer = model_args.mm_vision_select_layer
         mm_vision_select_feature = model_args.mm_vision_select_feature
-        pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter #这个其实就是预训练的适配器
+        pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter #这个其实就是预训练的适配器,在第二个阶段
         self.config.mm_vision_tower = vision_tower
         self.config.mm_vision_select_layer = mm_vision_select_layer
         self.config.mm_vision_select_feature = mm_vision_select_feature
@@ -62,13 +63,38 @@ class BunnyMetaModel:
             # In case it is frozen by LoRA
             for p in self.mm_projector.parameters():
                 p.requires_grad = True
-        if pretrain_mm_mlp_adapter is not None:
+        if pretrain_mm_mlp_adapter is not None and os.path.exists(pretrain_mm_mlp_adapter):
             mm_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
-            def get_w(weights, keyword):
-                return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
-            self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
-            incompatible_keys = self.vision_resampler.load_state_dict(get_w(mm_projector_weights, 'vision_resampler'), strict=False)
-            print(incompatible_keys)
+
+            def get_projector_w(weights):
+                # 逻辑：如果有前缀就切前缀，没前缀且是数字开头就直接返回
+                new_dict = {k.split('mm_projector.')[1]: v for k, v in weights.items() if 'mm_projector.' in k}
+                if not new_dict and any(k.split('.')[0].isdigit() for k in weights.keys()):
+                    return weights
+                return new_dict
+
+            self.mm_projector.load_state_dict(get_projector_w(mm_projector_weights))
+            print("✅ [Success] Projector weights loaded.........................")
+
+            # 2. 加载视觉塔融合层 (Vision Tower)
+            vt_tuned_path = pretrain_mm_mlp_adapter.replace('mm_projector.bin', 'vision_tower_tuned.bin')
+            if os.path.exists(vt_tuned_path):
+                vt_weights = torch.load(vt_tuned_path, map_location='cpu')
+
+                def get_vision_tower_w(weights):
+                    # 逻辑：如果有 vision_tower. 前缀就切掉
+                    new_dict = {k.split('vision_tower.')[1]: v for k, v in weights.items() if 'vision_tower.' in k}
+                    # 【核心修改点】：如果没有前缀，但 key 包含你定义的融合层关键字（如 mlp_layers）
+                    # 这种情况直接返回整个 weights，不要去管什么 0. 开头
+                    if not new_dict:
+                        fusion_keywords = ['mlp_layers', 'cross_attn', 'cls_weights', 'pseudo', 'score_predictor']
+                        if any(any(kw in k for kw in fusion_keywords) for k in weights.keys()):
+                            return weights
+                    return new_dict
+
+                vt_data = get_vision_tower_w(vt_weights)
+                msg = self.get_vision_tower().load_state_dict(vt_data, strict=False)
+                print(f"✅ [Success] Vision Tower Tuned loaded. Status: {msg}")
 
 class BunnyMetaForCausalLM(ABC):
     @abstractmethod
@@ -248,22 +274,34 @@ class BunnyMetaForCausalLM(ABC):
         if _position_ids is None:
             position_ids = None
         
-        # 在 return 之前加入以下代码
         if new_input_embeds is not None and new_labels is not None:
-        # 验证点 1：长度一致性
+            # 1. 基础长度检查 (你已经有的)
             assert new_input_embeds.shape[1] == new_labels.shape[1], "致命错误：Embeds 和 Labels 长度不一致！"
 
-        # 验证点 2：图像占位检查
-        # 图像区域对应的 Labels 必须全部是 -100
-        # 我们可以找出一个 batch，看看里面 -100 的分布
-            num_ignore = (new_labels[0] == -100).sum().item()
-            #print(f"DEBUG: [Final Check] Total length: {new_labels.shape[1]}, Ignore tokens: {num_ignore}")
+            # 2. 检查有效监督信号 (防止全是 -100)
+            # 我们检查整个 batch 是否存在至少一个有效 token
+            valid_tokens_mask = (new_labels != -100)
+            total_valid_tokens = valid_tokens_mask.sum().item()
+            
+            if total_valid_tokens == 0:
+                # 如果这一个 batch 全是 -100，Loss 会变成 0 或者 NaN
+                # 打印警告信息，并强制给第一位一个 dummy label 维持梯度计算不崩溃
+                print(f"⚠️ [Warning] 发现全空 Label Batch! 正在实施防御...")
+                new_labels[0, 0] = 0 # 强制给一个信号
 
-        # 验证点 3：检查是否有“有效答案”残留
-        # 如果有效 token 数量太少，说明大部分内容被 truncate 切掉了
-            valid_tokens = (new_labels[0] != -100).sum().item()
-            #if valid_tokens < 5:
-                #print(f"⚠️ 警告：当前样本有效 Token 仅为 {valid_tokens}，可能由于 truncate_max_length 过短导致答案被切除！")
+            # 3. 数值稳定性检查 (防 NaN/Inf 的核心)
+            # 检查视觉特征和文本嵌入是否已经炸了
+            if torch.isnan(new_input_embeds).any() or torch.isinf(new_input_embeds).any():                
+                # 使用 nan_to_num 替代 torch.where，效率更高
+                # nan=0.0: 将 NaN 归零
+                # posinf=65500: 将正无穷限制在 FP16 的安全上限 (T4 溢出的重灾区)
+                # neginf=-65500: 将负无穷限制在 FP16 的安全下限
+                new_input_embeds = torch.nan_to_num(
+                    new_input_embeds, 
+                    nan=0.0, 
+                    posinf=65500, 
+                    neginf=-65500
+                )
 
 
         return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels

@@ -715,8 +715,8 @@ class DataCollatorForSupervisedDataset(object):
 
         return batch
 
-#在这个地方考虑如何处理样本和批次
-def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
+#在这个地方考虑如何处理样本和批次,这个上面的是为了训练bunny的，不要删除，下面那个新的是为了训练的时候使用gpt4v的
+'''def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
                                 data_args) -> Dict:
     """Make dataset and collator for supervised fine-tuning."""
     train_dataset = LazySupervisedDataset(tokenizer=tokenizer,
@@ -725,10 +725,47 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     return dict(train_dataset=train_dataset,
                 eval_dataset=None,
-                data_collator=data_collator)
+                data_collator=data_collator)'''
 
 
+def make_supervised_data_module(tokenizer, data_args) -> Dict:
+    """在内部完成切分，确保属性不丢失"""
+    full_dataset = LazySupervisedDataset(
+        tokenizer=tokenizer,
+        data_path=data_args.data_path,
+        data_args=data_args
+    )
+    
+    # 设置验证集大小
+    val_size = 2000
+    train_size = len(full_dataset) - val_size
+    
+    # 随机切分
+    train_subset, eval_subset = torch.utils.data.random_split(
+        full_dataset, [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
 
+    # --- ✨ 核心修复：手动同步属性 ---
+    # 获取原始数据集的所有长度信息
+    full_mlen = full_dataset.modality_lengths 
+    
+    # 将对应的长度信息重新注入到 Subset 对象中
+    train_subset.modality_lengths = [full_mlen[i] for i in train_subset.indices]
+    eval_subset.modality_lengths = [full_mlen[i] for i in eval_subset.indices]
+    
+    # 为了防止某些逻辑检查 list_data_dict，也一并透传
+    train_subset.list_data_dict = [full_dataset.list_data_dict[i] for i in train_subset.indices]
+    eval_subset.list_data_dict = [full_dataset.list_data_dict[i] for i in eval_subset.indices]
+    # -------------------------------
+
+    data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
+    
+    return dict(
+        train_dataset=train_subset,
+        eval_dataset=eval_subset,
+        data_collator=data_collator
+    )
 
 
 

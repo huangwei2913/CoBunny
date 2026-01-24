@@ -211,66 +211,104 @@ class BunnyTrainer(Trainer):
         return self.optimizer
 
     def _save_checkpoint(self, model, trial, metrics=None):
-        # 1. 先调用父类方法，这会尝试保存 trainer_state.json 等基础信息
-        super()._save_checkpoint(model, trial)
+            # 1. 保存 Trainer 状态（Loss 曲线、Step 数等）
+            super()._save_checkpoint(model, trial)
 
-        if getattr(self.args, 'tune_mm_mlp_adapter', False):
             from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
             checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
-            run_dir = self._get_output_dir(trial=trial)
-            output_dir = os.path.join(run_dir, checkpoint_folder)
+            output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
 
-            # --- 分流保存逻辑 ---
-            lora_state_dict = {}
-            projector_state_dict = {}
-            
-            # 遍历所有需要训练的参数
-            for name, param in self.model.named_parameters():
-                if param.requires_grad:
-                    param_cpu = param.data.cpu()
-                    # 属于 LoRA 的权重
-                    if "lora_" in name:
-                        lora_state_dict[name] = param_cpu
-                    # 属于 Projector 或 融合层 的权重
-                    elif "mm_projector" in name or "vision_tower" in name:
-                        projector_state_dict[name] = param_cpu
-
+            # 2. 只有主进程执行合并与全量保存
             if self.args.local_rank <= 0:
-                os.makedirs(output_dir, exist_ok=True)
-                
-                # A. 保存标准 LoRA 权重文件
-                if len(lora_state_dict) > 0:
-                    # 使用 PEFT 约定的文件名
-                    lora_save_path = os.path.join(output_dir, 'adapter_model.bin')
-                    torch.save(lora_state_dict, lora_save_path)
-                    # 同时保存配置文件（如果存在）
-                    if hasattr(self.model, "peft_config"):
-                        self.model.peft_config['default'].save_pretrained(output_dir)
-                    print(f"✅ 已保存标准 LoRA 权重 ({len(lora_state_dict)} keys)")
+                print(f"\n🚀 [Step {self.state.global_step}] 启动全量固化与配置同步...")
 
-                # B. 保存标准的 mm_projector 权重文件
-                if len(projector_state_dict) > 0:
-                    projector_save_path = os.path.join(output_dir, 'mm_projector.bin')
-                    torch.save(projector_state_dict, projector_save_path)
-                    print(f"✅ 已保存 Projector/Fusion 权重 ({len(projector_state_dict)} keys)")
+                import copy
+                # 注意：在显存紧张的情况下，deepcopy 可能会导致 OOM。
+                # 但为了保证 merge_and_unload 不影响训练中的梯度链，copy 是最稳妥的。
+                temp_model = copy.deepcopy(self.model)
+                
+                # --- ✨ 核心逻辑：自动同步 ModelArguments 到 Config ---
+                # 我们将 ModelArguments 中的所有字段同步到 config 中，确保保存后的 config.json 完整
+                # 这样推理时 builder.py 才能正确识别你的 mixedencoder 结构
+                
+                attrs_to_sync = [
+                    "model_type", "version", "freeze_backbone", "tune_mm_mlp_adapter",
+                    "unfreeze_mm_vision_tower", "vision_tower", "unfreeze_vision_tower",
+                    "use_s2", "mm_vision_select_layer", "pretrain_mm_mlp_adapter",
+                    "mm_projector_type", "mm_resampler_type", "mm_use_im_start_end",
+                    "mm_use_im_patch_token", "tune_mm_vision_resampler", "mm_mask_drop_mode",
+                    "mm_mask_drop_skip_percentage", "mm_mask_drop_ratio", "mm_mask_drop_ratio_upper",
+                    "mm_mask_drop_ratio_lower", "mm_vision_select_feature", "mm_dense_connector_type",
+                    "vision_tower_dino", "vision_tower_siglip", "compression_K", "mm_hidden_size"
+                ]
+
+                for attr in attrs_to_sync:
+                    # 优先从当前训练模型的 config 中取，取不到则保持 None
+                    val = getattr(self.model.config, attr, None)
+                    setattr(temp_model.config, attr, val)
+                    
+                # 标记这是一个已经固化过的模型，不再需要外挂 LoRA
+                temp_model.config.lora_enable = False 
+
+                # --- 3. 物理合并 LoRA (如果是 LoRA 模式) ---
+                if getattr(self.args, 'lora_enable', False):
+                    print("   🔗 正在执行权重合并 (Merge LoRA)...")
+                    # merge_and_unload 会将线性层权重相加，返回原始结构的 Model
+                    temp_model = temp_model.merge_and_unload()
+                
+                # --- 4. 执行全量物理保存 ---
+                # save_pretrained 会自动根据权重体积生成 model.safetensors 或 pytorch_model.bin
+                # 它会包含 LLM、Projector 和你解冻的 Vision Tower 全部 113+ 参数
+                print(f"   💾 正在写入全量文件至 {output_dir} ...")
+                temp_model.save_pretrained(output_dir)
+                
+                if self.tokenizer is not None:
+                    self.tokenizer.save_pretrained(output_dir)
+                
+                # 显式清理内存
+                del temp_model
+                print(f"✅ [Checkpoint {self.state.global_step}] 保存成功！该目录可直接用于独立推理。")
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
-        """
-        覆盖主保存逻辑：
-        确保在训练结束或手动调用 save_model 时，逻辑一致。
-        """
-        if getattr(self.args, 'tune_mm_mlp_adapter', False):
-            output_dir = output_dir if output_dir is not None else self.args.output_dir
-            os.makedirs(output_dir, exist_ok=True)
+        output_dir = output_dir if output_dir is not None else self.args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
 
-            weight_to_save = {}
-            for name, param in self.model.named_parameters():
-                if param.requires_grad:
-                    weight_to_save[name] = param.data.cpu()
-
+        if getattr(self.args, 'lora_enable', False):
             if self.args.local_rank <= 0:
-                self.model.config.save_pretrained(output_dir)
-                torch.save(weight_to_save, os.path.join(output_dir, 'mm_projector.bin'))
-                print(f"✅ [Final Save] Saved {len(weight_to_save)} keys to mm_projector.bin")
+                print(f"🚀 [全量化保存] 正在强制固化 Config 并合并权重...")
+                
+                import copy
+                # 1. 深度拷贝模型
+                temp_model = copy.deepcopy(self.model)
+                
+                # --- ✨ 修复点：安全地获取 ModelArguments 中的路径 ✨ ---
+                # 注意：self.args 是 TrainingArguments，不含 vision_tower_dino
+                # 我们需要使用 self.model.config 里的值，或者在初始化 Trainer 时传入的 model_args
+                
+                # 尝试从模型现有的 config 中提取，如果不存在，则使用默认逻辑
+                # 通常在 train.py 初始化时，这些值已经被赋给了 model.config
+                v_dino = getattr(self.model.config, 'vision_tower_dino', None)
+                v_siglip = getattr(self.model.config, 'vision_tower_siglip', None)
+                p_type = getattr(self.model.config, 'mm_projector_type', 'mlp2x_gelu')
+
+                # 强制写入 temp_model 的 config，确保 save_pretrained 能写进 config.json
+                temp_model.config.vision_tower_dino = v_dino
+                temp_model.config.vision_tower_siglip = v_siglip
+                temp_model.config.mm_projector_type = p_type
+                temp_model.config.model_type = getattr(self.model.config, 'model_type', 'phi-1.5')
+                # -------------------------------------------------------
+
+                # 2. 物理合并 LoRA
+                temp_model = temp_model.merge_and_unload()
+                temp_model.config.lora_enable = False 
+                
+                # 3. 执行全量保存
+                temp_model.save_pretrained(output_dir)
+                
+                if self.tokenizer is not None:
+                    self.tokenizer.save_pretrained(output_dir)
+                
+                del temp_model
+                print(f"✅ [成功] 全量模型及配置已保存至 {output_dir}")
         else:
             super(BunnyTrainer, self)._save(output_dir, state_dict)

@@ -49,7 +49,9 @@ class ModelArguments:
     mm_vision_select_feature: Optional[str] = field(default="patch")
     mm_dense_connector_type: Optional[str] = field(default='dci')  #密集投影层类型
     vision_tower_dino: Optional[str] = field(default=None, metadata={"help": "DINOv2 子塔的权重路径"})
-    vision_tower_oryx: Optional[str] = field(default=None, metadata={"help": "Oryx/SigLIP 子塔的权重路径"})
+    vision_tower_siglip: Optional[str] = field(
+        default=None, metadata={"help": "SigLIP 子塔的权重路径，例如 google/siglip-so400m-patch14-384"}
+    )
     compression_K: int = field(default=8, metadata={"help": "ToMe 算法的压缩倍率"})
     mm_hidden_size: int = field(default=1024)
 
@@ -191,7 +193,9 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
         for name, param in trainer.model.named_parameters():
             if param.requires_grad:
                 # 兼容 DeepSpeed Zero2/Zero3，确保拿到 CPU 上的数据
-                weight_to_save[name] = param.data.cpu()
+                clean_data = torch.nan_to_num(param.data.detach().cpu(), nan=0.0, posinf=65500, neginf=-65500)
+                weight_to_save[name] = clean_data.cpu()
+              
 
         # 主进程负责物理写入磁盘
         if trainer.args.local_rank <= 0:
@@ -410,6 +414,38 @@ def train():
 
 
     model.get_model().initialize_vision_modules(model_args=model_args)
+    model.resize_token_embeddings(len(tokenizer))
+
+    # 2. 🛡️【核心修复】手动计算老词的均值，填补给新词
+    input_embeddings = model.get_input_embeddings().weight
+    output_embeddings = model.get_output_embeddings().weight
+    # 计算老词（原生 50257 个词）的平均值
+    # 这样新词就长得像老词一样，不会惊吓到模型
+    current_size = input_embeddings.shape[0]
+    SAFE_VOCAB_SIZE = 50257
+    if current_size > SAFE_VOCAB_SIZE:
+        rank0_print(f"🚨 检测到词表差异！当前: {current_size}, 原生安全区: {SAFE_VOCAB_SIZE}")
+        with torch.no_grad():
+            # 计算原生词表的均值
+            in_avg = input_embeddings[:SAFE_VOCAB_SIZE].mean(dim=0, keepdim=True)
+            out_avg = output_embeddings[:SAFE_VOCAB_SIZE].mean(dim=0, keepdim=True)
+            # 【关键操作】：把 50257 之后的所有位置（不管是 38 个还是 900 个）全部初始化
+            input_embeddings[SAFE_VOCAB_SIZE:] = in_avg
+            output_embeddings[SAFE_VOCAB_SIZE:] = out_avg
+            
+        rank0_print(f"✅ 已清理并初始化 {current_size - SAFE_VOCAB_SIZE} 个潜在危险槽位。")
+
+
+
+    if training_args.local_rank == 0:
+        print("✅ 已手动初始化新增 Token！梯度爆炸隐患已清除。")
+
+    # 3. 🛡️【双重保险】把所有参数强制转为 float32 进行一次清洗，再转回 float16
+    # 这能保证即便刚才 resize 产生了细微的 NaN，也被洗掉了
+    for p in model.parameters():
+        if p.requires_grad:
+            # 只处理参与训练的参数
+            p.data = torch.nan_to_num(p.data, nan=0.0, posinf=65500, neginf=-65500)
     # ...
     #################### ⭐️ 插入调试代码 ⭐️ ####################
     if model_args.pretrain_mm_mlp_adapter:
@@ -507,27 +543,44 @@ def train():
                         module = module.to(torch.bfloat16)
 
 
-    #设置数据处理模块
-    data_module = make_supervised_data_module(tokenizer=tokenizer,
-                                              data_args=data_args)
+    ''' 
+        #设置数据处理模块,这一部分是为了训练的时候，使用相关bunny数据集的
+        data_module = make_supervised_data_module(tokenizer=tokenizer,
+                                                data_args=data_args)
 
-    # 2. 从训练集中切出一小部分作为验证集 (例如 2000 条，足够反映收敛情况)
-    full_train_dataset = data_module['train_dataset']
-    num_val_samples = 2000 
-    num_train_samples = len(full_train_dataset) - num_val_samples
+        # 2. 从训练集中切出一小部分作为验证集 (例如 2000 条，足够反映收敛情况)
+        full_train_dataset = data_module['train_dataset']
+        num_val_samples = 2000 
+        num_train_samples = len(full_train_dataset) - num_val_samples
 
-    # 使用 torch.utils.data.random_split 进行随机切分
-    train_dataset, eval_dataset = torch.utils.data.random_split(
-                                         full_train_dataset, 
-                                         [num_train_samples, num_val_samples],
-                                        generator=torch.Generator().manual_seed(42) # 固定随机种子，确保多机训练时行为一致
-                                        )
+        # 使用 torch.utils.data.random_split 进行随机切分
+        train_dataset, eval_dataset = torch.utils.data.random_split(
+                                            full_train_dataset, 
+                                            [num_train_samples, num_val_samples],
+                                            generator=torch.Generator().manual_seed(42) # 固定随机种子，确保多机训练时行为一致
+                                            )
 
-    # 3. 更新 data_module
-    data_module['train_dataset'] = train_dataset
-    data_module['eval_dataset'] = eval_dataset
-        
+        # 3. 更新 data_module
+        data_module['train_dataset'] = train_dataset
+        data_module['eval_dataset'] = eval_dataset
+            
+    ''''''''' 
 
+    # 1. 直接调用修改后的函数，它会一次性返回切分好的训练集和验证集,这个是为了使用那个sharegpt4v的
+    data_module = make_supervised_data_module(
+        tokenizer=tokenizer,
+        data_args=data_args
+    )
+
+    # 2. 原本在 train.py 里的 random_split 逻辑全部删掉
+    # 因为我们在 data_utils.py 内部已经处理好了属性透传
+
+    model.config.vision_tower_dino = model_args.vision_tower_dino
+    model.config.vision_tower_siglip = model_args.vision_tower_siglip
+    model.config.mm_projector_type = model_args.mm_projector_type
+    model.config.model_type = model_args.model_type
+    # 额外建议：把 lora_enable 也同步进去，虽然保存时我们会强制改它
+    model.config.lora_enable = training_args.lora_enable
 
     #   返回dict(train_dataset=train_dataset,
     #            eval_dataset=None,
@@ -542,22 +595,32 @@ def train():
     
 
     if training_args.local_rank == 0 or training_args.local_rank == -1:
-        rank0_print("\n" + "="*50)
+        rank0_print("\n" + "="*80)
         rank0_print("🔍 [Parameter Check] 正在扫描可训练参数...")
+        rank0_print(f"{'参数名称':<60} | {'形状':<20} | {'梯度'}")
+        rank0_print("-" * 95)
         
+        # 1. 修复：必须先初始化计数器
+        trainable_params_count = 0
         trainable_params = []
+        
         for name, p in model.named_parameters():
             if p.requires_grad:
                 trainable_params.append(name)
-                # 打印前几个 key 看看路径对不对
-                if len(trainable_params) <= 10:
-                    rank0_print(f"   ✅ 可训练: {name}")
+                trainable_params_count += 1
+                # 2. 修复：变量名统一使用 p，而不是 param
+                shape_str = str(list(p.shape))
+                rank0_print(f"{name:<60} | {shape_str:<20} | {p.requires_grad}")
         
-        rank0_print(f"...\n   总计可训练参数项: {len(trainable_params)}")
+        rank0_print("-" * 95)
+        rank0_print(f"📊 总计可训练参数项: {trainable_params_count}")
         
-        # 特别检查你的创新点是否在列表里
-        fusion_found = any('vision_tower' in n for n in trainable_params)
-        projector_found = any('mm_projector' in n for n in trainable_params)
+        # --- 逻辑验证 ---
+        vision_tower_params = [n for n in trainable_params if "vision_tower" in n]
+        projector_params = [n for n in trainable_params if "mm_projector" in n]
+        
+        fusion_found = len(vision_tower_params) > 0
+        projector_found = len(projector_params) > 0
         
         if fusion_found and projector_found:
             rank0_print("🚀 状态确认：混合编码器融合层 和 Projector 已全部解冻！")
@@ -567,7 +630,10 @@ def train():
             if not projector_found:
                 rank0_print("❌ 警告：未发现 mm_projector 的可训练参数！")
         
-        rank0_print("="*50 + "\n")
+        rank0_print(f"🔍 逻辑明细：")
+        rank0_print(f"   - 混合塔内部参数 (vision_tower): {len(vision_tower_params)} 项")
+        rank0_print(f"   - 外部连接投影器 (mm_projector): {len(projector_params)} 项")
+        rank0_print("="*80 + "\n")
 
 # ==================== 🔍 更加稳健的自检 Debug 代码 ====================
     if training_args.local_rank == 0 or training_args.local_rank == -1:
@@ -630,22 +696,33 @@ def train():
     trainer.save_state()
 
     model.config.use_cache = True
+    # 2. 只在主进程 (Rank 0) 执行全量合并保存
+    if training_args.local_rank <= 0:
+        print("📢 [全量保存启动] 正在收集分布式权重并物理合并 LoRA...")
 
-    if training_args.lora_enable:
-        state_dict = get_peft_state_maybe_zero_3(
-            model.named_parameters(), training_args.lora_bias
-        )
-        non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
-            model.named_parameters()
-        )
-        if training_args.local_rank == 0 or training_args.local_rank == -1:
-            model.config.save_pretrained(training_args.output_dir)
-            model.save_pretrained(training_args.output_dir, state_dict=state_dict)
-            torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, 'non_lora_trainables.bin'))
-    else:
-        safe_save_model_for_hf_trainer(trainer=trainer,
-                                       output_dir=training_args.output_dir)
-
+        # 如果模型是 PeftModel (开启了 LoRA)
+        if training_args.lora_enable:
+            # 核心逻辑：物理合并
+            # merge_and_unload 会把 BA 矩阵加回 W，并返回一个正常的 BunnyPhiForCausalLM 对象
+            model = model.merge_and_unload()
+            
+            # 强制更新 config，关闭推理时的 lora 搜索，因为它已经合进去了
+            model.config.lora_enable = False
+            
+            # 此时的 model.state_dict() 已经包含了：
+            # - 合并后的全量 LLM 权重
+            # - 微调后的 Projector 权重 (无需手动 replace)
+            # - 微调后的 Vision Tower 权重
+            
+            # 保存整个文件夹
+            model.save_pretrained(training_args.output_dir)
+            tokenizer.save_pretrained(training_args.output_dir)
+            
+            print(f"✅ 全量模型已保存至: {training_args.output_dir}")
+            print("ℹ️ 推理说明：直接使用 BunnyPhiForCausalLM.from_pretrained 加载此目录即可。")
+        else:
+            # 如果是全量微调，正常保存即可
+            trainer.save_model()
 
 if __name__ == "__main__":
     train()
