@@ -27,6 +27,7 @@ class ImageProcessorMultipleEncoders:
     def __init__(self, patch_size_list: List[int], target_size: int = 384):
         self.target_size = target_size 
         self.patch_lcm = 14 
+        self.crop_size = {"height": target_size, "width": target_size}
         self.dino_transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),

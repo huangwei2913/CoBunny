@@ -10,8 +10,8 @@ from bunny.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN
 from bunny.model.multimodal_encoder.AdaptiveConcatenationVisionTower import ImageProcessorMultipleEncoders
 
 def run_debug_inference():
-    model_path = "/mnt/CoBunny/checkpoints-finetune/bunny-phi1.5-mixed-lora-695k/checkpoint-6619"
-    image_path = "testt.jpg"
+    model_path = "/mnt/CoBunny/checkpoints-finetune/bunny-phi1.5-mixed-lora-695k/checkpoint-23476"
+    image_path = "xx.jpg"
     device = "cuda"
 
     print(f"--- 🛠️ 开始深度诊断 ---")

@@ -87,7 +87,7 @@ bunny/serve/gradio_web_server.py
 bunny/serve/model_worker.py
 bunny/serve/register_worker.py
 bunny/train/bunny_trainer.py
-bunny/train/train.py
+bunny/train/train_stage3.py
 bunny/util/data_utils.py
 bunny/util/merge.py
 bunny/util/mm_utils.py
@@ -95,11 +95,6 @@ bunny/util/utils.py
 bunny/util/s2wrapper/__init__.py
 bunny/util/s2wrapper/core.py
 bunny/util/s2wrapper/utils.py
-checkpoints-finetune/bestloracheckpoint/zero_to_fp32.py
-checkpoints-finetune/checkpoint-20_bak/zero_to_fp32.py
-checkpoints-pretrain/oryx_phi/find_min_loss.py
-checkpoints-pretrain/oryx_phi/jb.py
-checkpoints-pretrain/oryx_phi/rb.py
 dinov3/__init__.py
 dinov3/checkpointer/__init__.py
 dinov3/checkpointer/checkpointer.py
