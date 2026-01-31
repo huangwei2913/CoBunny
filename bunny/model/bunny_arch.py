@@ -5,13 +5,20 @@ from .multimodal_resampler.builder import build_vision_resampler
 from .multimodal_projector.builder import build_vision_projector
 from bunny.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX
 import os
+
+local_rank = None
+def rank0_print(*args):
+    if local_rank == 0:
+        print(*args)
+
 #直接强制选择这个indeity投影，直接在这个里面，在增加一个开源的openvision2的编码器，并初始化装载
 class BunnyMetaModel:
     def __init__(self, config):
         super(BunnyMetaModel, self).__init__(config)
-        if hasattr(config, "mm_vision_tower"):
-            self.vision_tower = build_vision_tower(config, delay_load=not getattr(config, 'continuous_training', False))
-            #这个地方可以添加的，因为不传递的话，就是indentifymap
+        if hasattr(config, "mm_vision_tower"):  #continuous_training通常都为False
+            self.vision_tower = build_vision_tower(config, delay_load=not getattr(config, 'continuous_training', False))  #如果 continuous_training 是 False（通常是默认状态）： delay_load 变成 True。
+            #这个地方可以添加的，因为不传递的话，就是indentifymap 
+            #如果 continuous_training 是 True： delay_load 变成 False。发生什么： 视觉塔会立即去 /mnt/facebook/... 读原始权重。意图： 这通常用于你从零开始训练（比如刚从 LLM 接入 Vision Tower 的第一阶段），此时没有现成的 Checkpoint 可读，必须从官方权重开始。
             self.vision_resampler = build_vision_resampler(config, vision_tower=self.vision_tower)     
             if getattr(config, 'continuous_training', False):
                 config.continuous_training = False
@@ -22,16 +29,14 @@ class BunnyMetaModel:
         if type(vision_tower) is list:
             vision_tower = vision_tower[0]
         return vision_tower # 也就说我们的双塔视觉编码器返回的是自己本身
+    
     def initialize_vision_modules(self, model_args):
         vision_tower = model_args.vision_tower
         #这个地方传递进了模型的视觉塔名称，我们要在这里加入
-        mm_vision_select_layer = model_args.mm_vision_select_layer
-        mm_vision_select_feature = model_args.mm_vision_select_feature
         pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter #这个其实就是预训练的适配器,在第二个阶段
         self.config.mm_vision_tower = vision_tower
-        self.config.mm_vision_select_layer = mm_vision_select_layer
-        self.config.mm_vision_select_feature = mm_vision_select_feature
         if self.get_vision_tower() is None:
+            print("🚨🚨🚨 警告：进入了创建新塔的分支！！！！！") # 看看训练开始时这一行会不会打印
             vision_tower = build_vision_tower(model_args)
             vision_resampler = build_vision_resampler(model_args, vision_tower=vision_tower)
             for k, v in vision_resampler.config.items():
@@ -41,22 +46,25 @@ class BunnyMetaModel:
         else:
             vision_tower = self.vision_tower
             vision_resampler = self.vision_resampler
-            vision_tower.load_model()
+
+            # 强制自检：检查是否已经有 803 个 Key 进场了
+            has_weights = any("dino_vision_tower" in n for n, _ in self.named_parameters())
+
+            if has_weights:
+                rank0_print("🎯 [精准衔接] 检测到 Stage 2 权重已载入，封印官方加载路径，保护训练成果！")
+            # 此时绝对不调用 vision_tower.load_model()
+                self.get_vision_tower().is_loaded = True 
+            else:
+            # 只有在万一没读到权重时才去读官方
+                self.get_vision_tower().load_model()
+
             for p in self.vision_resampler.parameters():
                 p.requires_grad = True
+            vision_tower.to(dtype=torch.float16, device='cuda') #
+
         self.config.use_mm_proj = True
         self.config.mm_projector_type = getattr(model_args, 'mm_projector_type')
-        self.config.mm_resampler_type = getattr(model_args, 'mm_resampler_type')
-        if self.config.mm_resampler_type=='masked_drop':
-            self.config.mm_hidden_size = vision_tower.hidden_size #投影层的输入特征维度要等于视觉编码器的特征维度
-        elif self.config.mm_resampler_type=='spatial_pool':
-            self.config.mm_hidden_size = vision_resampler.out_channels #投影层的输入特征维度要等于视觉编码器的特征维度
-        elif self.config.mm_resampler_type=='qformer':
-            self.config.mm_hidden_size = vision_resampler.hidden_size #投影层的输入特征维度要等于视觉编码器的特征维度
-        elif self.config.mm_resampler_type=='dynamic_compressor':
-            self.config.mm_hidden_size = vision_resampler.hidden_size #投影层的输入特征维度要等于视觉编码器的特征维度
-        else:
-            self.config.mm_hidden_size = vision_tower.hidden_size #投影层的输入特征维度要等于视觉编码器的特征维度
+        self.config.mm_hidden_size = vision_tower.hidden_size #投影层的输入特征维度要等于视觉编码器的特征维度
         if getattr(self, 'mm_projector', None) is None:
             self.mm_projector = build_vision_projector(self.config)
         else:
@@ -107,16 +115,12 @@ class BunnyMetaForCausalLM(ABC):
         vision_tower = self.get_model().get_vision_tower()
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         if "AdaptiveConcatenationVisionTower" in str(type(vision_tower)):
-   
             image_features, _ = vision_tower(images)
-   
             image_features = self.get_model().mm_projector(image_features)
-          
             return image_features
         mm_resampler_type = getattr(self.config, 'mm_resampler_type', None)
 
         if mm_resampler_type is None:  # 常规处理模式, 这里我们希望的
-
             image_features, _ = self.get_model().get_vision_tower()(images)  #这里是希望能返回中间层特征
             image_features = self.get_model().mm_projector(image_features)
             return image_features

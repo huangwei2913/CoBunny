@@ -39,6 +39,7 @@ bunny/model/language_model/stage1pre.py
 bunny/model/language_model/stage2finedtunedwithlora.py
 bunny/model/language_model/stage2finetuned.py
 bunny/model/language_model/stage2modifyied.py
+bunny/model/language_model/stage3full.py
 bunny/model/language_model/test.py
 bunny/model/language_model/llama/__init__.py
 bunny/model/language_model/llama/configuration_llama.py
@@ -86,7 +87,9 @@ bunny/serve/controller.py
 bunny/serve/gradio_web_server.py
 bunny/serve/model_worker.py
 bunny/serve/register_worker.py
+bunny/train/arguments.py
 bunny/train/bunny_trainer.py
+bunny/train/train.py
 bunny/train/train_stage3.py
 bunny/util/data_utils.py
 bunny/util/merge.py

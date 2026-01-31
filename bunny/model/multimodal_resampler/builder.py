@@ -19,7 +19,7 @@ class IdentityMap(torch.nn.Module):
 
 def build_vision_resampler(model_args, delay_load=False, **kwargs):
     # import pdb;pdb.set_trace()
-    resampler_type = getattr(model_args, 'mm_resampler_type', None)
+    resampler_type = getattr(model_args, 'mm_resampler_type', None)  #在本项目中没有被用到，都是None
     if resampler_type == 'masked_drop':
         return MaskedDrop(model_args)
     elif resampler_type == 'spatial_pool':

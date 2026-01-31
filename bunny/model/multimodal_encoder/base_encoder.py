@@ -38,7 +38,6 @@ class BaseVisionTower(nn.Module):
         self.select_layer = -2
         self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
         self.unfreeze_mm_vision_tower = getattr(args, 'unfreeze_mm_vision_tower', False)
-        print(f"Unfreezing MM Vision Tower.....................: {self.unfreeze_mm_vision_tower}")
         self.delay_load = delay_load
 
     @abstractmethod

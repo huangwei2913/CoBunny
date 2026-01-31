@@ -62,7 +62,7 @@ def process_images(images, image_processor, model_cfg):
 #只要知道是在序列中加入image，让image的token进行穿插，并考虑第一个分段的其实是不是bos
 #IMAGE_TOKEN_INDEX = -200 首先，以<image>分割输入文本，得到多段文本，然后对每一段tokenizer化，得到多段文本对应的tokens序列，也就是分段tokens
 def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None):
-    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split('<image>')]  #以<image>为界，把字符串分成多段文本（去掉图片标记的位置）
+    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split('<img_content>')]  #以<image>为界，把字符串分成多段文本（去掉图片标记的位置）
 
     #在 X 的每两个元素之间插入一个分隔符 sep[i]，但不在最后一个元素后再加一个分隔符。
     def insert_separator(X, sep):

@@ -20,6 +20,7 @@ for token, token_id in sorted_vocab[:20]:
 # 4. 重点检查：你的自定义 Token 是否在里面
 print(f"\n<image> ID: {tokenizer.convert_tokens_to_ids('<image>')}")
 print(f"### ID: {tokenizer.convert_tokens_to_ids('###')}")
+print(f"### endoftext: {tokenizer.convert_tokens_to_ids('<|endoftext|>')}")
 
 text = "a\nb"
 ids = tokenizer.encode(text, add_special_tokens=False)

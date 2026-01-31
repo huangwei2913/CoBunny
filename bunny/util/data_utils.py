@@ -197,6 +197,15 @@ class LazySupervisedDataset(Dataset):
 
         self.list_data_dict = filtered_data
         rank0_print(f"Loaded {len(self.list_data_dict)} samples. Discarded {discarded_count} samples due to length.")
+        if not hasattr(self, 'modality_lengths'):
+        # 如果没有这个属性，我们根据是否存在 'image' 字段给出一个参考长度
+        # 图像 token 比较长，我们假设带图的为 1000，不带图的为 100
+            self.modality_lengths = []
+            for item in self.list_data_dict:
+                if 'image' in item:
+                    self.modality_lengths.append(400)
+                else:
+                    self.modality_lengths.append(100)
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -206,62 +215,80 @@ class LazySupervisedDataset(Dataset):
         if isinstance(i, int):
             sources = [sources]
             
-        # -------------------------------------------
-        # 图像处理逻辑
-        # -------------------------------------------
+        # ---------------------------------------------------------
+        # 🚨 高清“动态六子图”切分核心逻辑 (378x378 方案)
+        # ---------------------------------------------------------
         if 'image' in sources[0]:
             image_file = sources[0]['image']
             image_folder = self.data_args.image_folder
             processor = self.data_args.image_processor
             
-            # 支持多图列表 ["1.jpg", "2.jpg"] 或 单图路径 "1.jpg"
-            if isinstance(image_file, str):
-                image_files = [image_file]
-            else:
-                image_files = image_file
-                
+            # 支持多图列表或单图路径
+            image_files = [image_file] if isinstance(image_file, str) else image_file
+            
             pixel_values_list = []
+            target_sz = 378  # 设定子图标准尺寸
+
+            # 内部辅助函数：计算动态采样锚点，处理任意比例影像
+            def calculate_anchors(full_len, target_len):
+                if full_len <= target_len:
+                    return [0, 0, 0, 0, 0]
+                max_scroll = full_len - target_len
+                return [
+                    0,                      # 起点 (左/上)
+                    max_scroll // 4,        # 1/4处
+                    max_scroll // 2,        # 中点
+                    3 * max_scroll // 4,    # 3/4处
+                    max_scroll              # 终点 (右/下)
+                ]
+
             for img_path in image_files:
                 try:
-                    image = Image.open(os.path.join(image_folder, img_path)).convert('RGB')
+                    # 1. 加载原始高清图
+                    raw_image = Image.open(os.path.join(image_folder, img_path)).convert('RGB')
+                    w, h = raw_image.size
                     
-                    # 你的 Padding 逻辑 (保持不变)
-                    if self.data_args.image_aspect_ratio == 'pad':
-                        def expand2square(pil_img, background_color):
-                            width, height = pil_img.size
-                            if width == height:
-                                return pil_img
-                            elif width > height:
-                                result = Image.new(pil_img.mode, (width, width), background_color)
-                                result.paste(pil_img, (0, (width - height) // 2))
-                                return result
-                            else:
-                                result = Image.new(pil_img.mode, (height, height), background_color)
-                                result.paste(pil_img, ((height - width) // 2, 0))
-                                return result
-                        image = expand2square(image, tuple(int(x * 255) for x in processor.image_mean))
+                    # 2. 生成全局缩略图 (保持语义完整性)
+                    global_img = raw_image.resize((target_sz, target_sz), Image.BILINEAR)
                     
-                    # 预处理
-                    processed_img = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-                    pixel_values_list.append(processed_img)
+                    # 3. 计算动态锚点坐标
+                    x_coords = calculate_anchors(w, target_sz)
+                    y_coords = calculate_anchors(h, target_sz)
+                    
+                    # 4. 提取 5 个高清局部切片 (四角 + 绝对中心)
+                    # 这种方式直接从原图扣取像素，最大程度保留手机拍照细节
+                    crops = [
+                        raw_image.crop((x_coords[0], y_coords[0], x_coords[0] + target_sz, y_coords[0] + target_sz)), # 左上
+                        raw_image.crop((x_coords[4], y_coords[0], x_coords[4] + target_sz, y_coords[0] + target_sz)), # 右上
+                        raw_image.crop((x_coords[0], y_coords[4], x_coords[0] + target_sz, y_coords[4] + target_sz)), # 左下
+                        raw_image.crop((x_coords[4], y_coords[4], x_coords[4] + target_sz, y_coords[4] + target_sz)), # 右下
+                        raw_image.crop((x_coords[2], y_coords[2], x_coords[2] + target_sz, y_coords[2] + target_sz)), # 正中心
+                    ]
+                    
+                    # 5. 组合成 6 个子图序列并进行预处理
+                    six_images = [global_img] + crops
+                    # 对 6 张图执行 Normalize 和 ToTensor
+                    sub_image_dict = processor.preprocess(six_images, return_tensors='pt')
+                    
+                    # 堆叠为 [6, 2，3, ,374, 374] 的张量包
+                    pixel_values_list.append(sub_image_dict['pixel_values'])
+                    
                 except Exception as e:
                     print(f"Error loading image: {img_path}, {e}")
-                    # 返回全黑图作为 fallback，防止训练中断
-                    crop_size = self.data_args.image_processor.crop_size
-                    pixel_values_list.append(torch.zeros(3, crop_size['height'], crop_size['width']))
+                    # 异常兜底：返回全黑的 6 子图张量
+                    pixel_values_list.append(torch.zeros(6, 2, 3, target_sz, target_sz))
 
-            # 如果有多张图，堆叠起来 [N, 3, H, W]
-            # 如果只有一张，也是 [1, 3, H, W] 或者 [3, H, W] 取决于你的 Model Forward 怎么写
-            # Bunny 通常期望 list 或者 stacked tensor
-            if len(pixel_values_list) > 0:
-                image = torch.stack(pixel_values_list) if len(pixel_values_list) > 1 else pixel_values_list[0]
+            # # 最终堆叠 [Num_Images, 6, 2, 3, 378, 378]
+            # 这确保了 Model Forward 能够接收到 6 维张量
+            image = torch.stack(pixel_values_list)
             
-            # 调用预处理：把 <image> 换成 <img_content> 并加编号
+            # 调用原本的对话预处理逻辑
             sources = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources]), self.data_args)
             
         else:
             sources = copy.deepcopy([e["conversations"] for e in sources])
 
+        # 文本 Tokenize 过程
         data_dict = preprocess(
             sources,
             self.tokenizer,
@@ -269,16 +296,16 @@ class LazySupervisedDataset(Dataset):
             
         if isinstance(i, int):
             data_dict = dict(input_ids=data_dict["input_ids"][0],
-                             labels=data_dict["labels"][0])
+                                labels=data_dict["labels"][0])
 
+        # 将处理好的 6 维图像张量放入 data_dict
         if 'image' in self.list_data_dict[i]:
             data_dict['image'] = image
         elif self.data_args.is_multimodal:
-            crop_size = self.data_args.image_processor.crop_size
-            data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
+            # 非图样本的兜底填充，保持维度一致
+            data_dict['image'] = torch.zeros(1, 6, 2, 3, 378, 378)
             
         return data_dict
-
 # ---------------------------------------------------------
 # 数据整理器 (Padding)
 # ---------------------------------------------------------

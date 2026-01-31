@@ -15,7 +15,7 @@ INCLUDE_STR="192.168.0.3:0,1,2,3,4,5,6,7"
 # ========================================================
 MODEL_TYPE="phi-1.5"
 BASE_MODEL="./checkpoints-finetune/bunny-phi1.5-mixed-lora-695k/checkpoint-23476"
-OUTPUT_DIR="./checkpoints-stage3/bunny-phi1.5-full-finetune"
+OUTPUT_DIR="./checkpoints-stage3/bunny-phi1.5-full-finetune-modified"  #我们重新设计了第三个阶段代码
 DATA_PATH="/mnt/conda_data/Bunny-v1.1-data/finetune/bunny_stage3_mixed_2M.json"
 IMAGE_PATH="/"
 # 关键：指向 Stage 1 跑出来的那个包含 117 个 Key 的文件
@@ -53,7 +53,7 @@ deepspeed \
     --vision_tower_siglip /mnt/siglip-so400m-patch14-384 \
     --mm_projector_type mlp2x_gelu \
     --freeze_backbone False \
-    --unfreeze_vision_tower True \
+    --unfreeze_mm_vision_tower True \
     --lora_enable False \
     --bf16 False \
     --fp16 True \
@@ -76,4 +76,4 @@ deepspeed \
     --gradient_checkpointing True \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \
-    --report_to none 2>&1 | tee $OUTPUT_DIR/finetunesharegpt.log
+    --report_to none 2>&1 | tee $OUTPUT_DIR/finetunefull.log
