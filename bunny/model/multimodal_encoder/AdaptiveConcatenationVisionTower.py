@@ -132,18 +132,25 @@ class AdaptiveConcatenationVisionTower(nn.Module):
         self.final_cls_weights = nn.Parameter(torch.ones(2))
 
     def load_model(self):
+
+        def check_tower_valid(tower, attr_name):
+            try:
+                # 检查子塔是否已经具备了 Backbone 实例
+                if hasattr(tower, attr_name):
+                    param = next(tower.parameters())
+                    # 只有当权重不是随机初始化的（std=1.0）且有数值时才有效
+                    return param.numel() > 0 and torch.std(param.data).item() != 1.0
+            except:
+                return False
+            return False
+        
+
         # 1. 尝试探测当前内存中的权重是否为“有效”权重
-        is_weight_valid = False
-        try:
-            # 这里的逻辑是：如果是随机初始化，权重通常符合 N(0, 0.02)
-            # 如果是已经加载了官方或微调权重，其统计分布会非常具体
-            if hasattr(self.siglip_vision_tower, 'vision_model'):
-                param = next(self.siglip_vision_tower.parameters())
-                # 校验：不能全为0，且标准差不能为1（典型的随机初始化特征）
-                if param.numel() > 0 and torch.std(param).item() != 1.0:
-                    is_weight_valid = True
-        except Exception:
-            is_weight_valid = False
+        siglip_valid = check_tower_valid(self.siglip_vision_tower, 'vision_tower')
+        dino_valid = check_tower_valid(self.dino_vision_tower, 'vision_tower')
+        
+        is_weight_valid = siglip_valid and dino_valid
+        
 
         # 2. 身份识别与自动回退
         if self.is_loaded or is_weight_valid:
@@ -221,10 +228,11 @@ class AdaptiveConcatenationVisionTower(nn.Module):
         _, B_inter = self.siglip_vision_tower(siglip_input)
         
         A_proj = self.mlp_layers[0](A_inter.to(self.dtype))
+        del A_inter
         B_proj = self.mlp_layers[1](B_inter.to(self.dtype)) 
-
+        del B_inter
         # 这里的 1000 是个阈值，用来区分“单层特征”还是“多层拼接特征”
-        if A_proj.shape[1] > 1000: 
+        if self.N_layer_A > 1: 
             L_per_layer = A_proj.shape[1] // self.N_layer_A
             A_full = A_proj.view(Total_B, self.N_layer_A, L_per_layer, -1)
             B_full = B_proj.view(Total_B, self.N_layer_B, L_per_layer, -1)

@@ -44,23 +44,28 @@ class BunnyMetaModel:
             self.vision_tower = vision_tower            #给自身的vision_tower对象属性赋值
             self.vision_resampler = vision_resampler           
         else:
-            vision_tower = self.vision_tower
-            vision_resampler = self.vision_resampler
+            # 1. 即使检测到有权重，也要调用 load_model！, 这个地方在推理的时候，可能存在一定的bug，因为会重新加载模型官方模型
+            # 因为 load_model 里现在有“防御性逻辑”，它会自己判断是“跳过加载”还是“执行加载”
+            # 关键是：它会执行 _set_subtower_grad_state() 来锁定 eval 模式
+            current_vt = self.get_vision_tower()
 
-            # 强制自检：检查是否已经有 803 个 Key 进场了
-            has_weights = any("dino_vision_tower" in n for n, _ in self.named_parameters())
-
-            if has_weights:
-                rank0_print("🎯 [精准衔接] 检测到 Stage 2 权重已载入，封印官方加载路径，保护训练成果！")
-            # 此时绝对不调用 vision_tower.load_model()
-                self.get_vision_tower().is_loaded = True 
+            # 【核心修正】：如果它是 None，或者是字符串，说明都需要“实例化”
+            if current_vt is None or isinstance(current_vt, str):
+                # 走创建逻辑
+                vision_tower = build_vision_tower(model_args)
+                # ... 其他 build 逻辑 ...
+                self.get_model().vision_tower = vision_tower # 确保存进 model 里的属性
             else:
-            # 只有在万一没读到权重时才去读官方
-                self.get_vision_tower().load_model()
-
-            for p in self.vision_resampler.parameters():
-                p.requires_grad = True
-            vision_tower.to(dtype=torch.float16, device='cuda') #
+                # 说明已经是一个真正的模型对象了（推理或重用场景）
+                vision_tower = current_vt
+                # 既然是对象，现在调用这些方法才是安全的
+                if hasattr(vision_tower, 'load_model'):
+                    vision_tower.load_model()
+            
+        # 此时再统一设置梯度和转换精度，就再也不会报错了
+        vision_tower.to(dtype=torch.float16, device='cuda')
+        for p in vision_tower.parameters():
+            p.requires_grad = True
 
         self.config.use_mm_proj = True
         self.config.mm_projector_type = getattr(model_args, 'mm_projector_type')

@@ -111,7 +111,17 @@ def train():
         model.get_output_embeddings().weight[pad_id] = pad_embed
 
     rank0_print(f"✅ 权重搬家与词表强制对齐完成。当前词表大小: {len(tokenizer)}")
+    pad_id_in_tokenizer = tokenizer.pad_token_id
+    pad_id_by_name = tokenizer.convert_tokens_to_ids("<pad>")
 
+    rank0_print(f"🔍 [Tokenizer Check]")
+    rank0_print(f"   - <pad> token ID: {pad_id_by_name}")
+    rank0_print(f"   - tokenizer.pad_token_id: {pad_id_in_tokenizer}")
+
+    if pad_id_in_tokenizer != pad_id_by_name:
+        raise ValueError("🚨 严重错误：tokenizer.pad_token_id 与 <pad> 的实际 ID 不一致！")
+
+    rank0_print(f"   - <img_content> ID: {model.config.image_token_index}")
 
     # 1. 【强行注入】把 model_args 的意志强加给 model.config
     # 这样即使内部代码错误地使用了 config，它也能读到 True
@@ -220,7 +230,7 @@ def train():
     model.config.mm_projector_type = model_args.mm_projector_type
     model.config.model_type = model_args.model_type
     model.config.lora_enable = training_args.lora_enable
-
+    model.config.version = model_args.version
     # 10. 模板与数据加载
 # =========================================================
     # 模板初始化与强校验

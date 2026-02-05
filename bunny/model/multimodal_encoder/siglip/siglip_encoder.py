@@ -22,29 +22,51 @@ class SiglipVisionTower(BaseVisionTower): # 1. 改为继承 BaseVisionTower
             # 延迟加载时，只加载配置用于架构初始化
             self.cfg_only = SiglipVisionConfig.from_pretrained(self.vision_tower_name)
 
-    def load_model(self):
-        if self.is_loaded:
-            return
+    def load_model(self, device_map=None):
+        """
+        核心逻辑：实现“防御性加载”。
+        1. 检查灵魂（权重）是否已由 builder.py 的 from_pretrained 注入。
+        2. 如果已被注入，则跳过官方权重加载，保护微调成果。
+        3. 如果是空架构，则加载官方底座。
+        """
+        # 1. 探测“灵魂”注入状态
+        has_injected_weights = False
         
-        # 加载核心组件
-        self.image_processor = SiglipImageProcessor.from_pretrained(self.vision_tower_name)
-        self.vision_tower = SiglipVisionModel.from_pretrained(self.vision_tower_name)
-        
-        # 3. 核心解冻/冻结逻辑控制
-        # self.unfreeze_mm_vision_tower 是从 args.unfreeze_mm_vision_tower 自动获取的
-        # 🚨 修正点：确保从 args 准确读取，并显式转换或检查内容
- 
-        # 调试打印：让你在日志里一眼看到底传了什么
-        print(f"DEBUG: unfreeze_mm_vision_tower value is.... {self.unfreeze_mm_vision_tower}")
+        # 检查属性是否存在，且不是 None (应对 HuggingFace 的 setattr 注入)
+        if hasattr(self, 'vision_tower') and self.vision_tower is not None:
+            try:
+                # 检查参数量和实质内容：如果 std != 1.0 且 > 0，说明是真实的微调权重
+                param = next(self.vision_tower.parameters())
+                if param.numel() > 0 and torch.std(param.data).item() != 1.0:
+                    has_injected_weights = True
+            except (StopIteration, AttributeError):
+                pass
 
+        # 2. 决策：执行加载或保护
+        if has_injected_weights:
+            print(f"🚀 [SigLIP Safe Load] 探测到有效的微调权重注入，跳过官方底座覆盖，保护 0.65 精度成果。")
+            # 即使注入了权重，通常 processor 也需要手动补齐
+            if self.image_processor is None:
+                self.image_processor = SiglipImageProcessor.from_pretrained(self.vision_tower_name)
+        else:
+            # 只有在完全感知不到“灵魂”的情况下（如 Stage 1 或注入失败），才加载官方底座
+            print(f"🏗️ [SigLIP Initial Load] 探测不到有效权重，正在加载官方预训练底座: {self.vision_tower_name}")
+            self.vision_tower = SiglipVisionModel.from_pretrained(self.vision_tower_name)
+            self.image_processor = SiglipImageProcessor.from_pretrained(self.vision_tower_name)
+
+        # 3. 意志同步：状态对齐与 T4 硬件适配
+        # 强制转换到正确的设备和精度 (Tesla T4 必须用 FP16)
+        self.vision_tower.to(device=self.device, dtype=torch.float16)
+
+        # 根据配置决定是否开启梯度 (全量微调 vs 推理)
         if self.unfreeze_mm_vision_tower:
             self.vision_tower.requires_grad_(True)
-            self.vision_tower.train() # 别忘了开启 train 模式
-            print(f"🔥 [SigLIP] Full Parameter Fine-tuning Enabled.")
+            self.vision_tower.train()
+            print(f"🔥 [SigLIP State] 视觉塔模式: TRAIN (微调中)")
         else:
             self.vision_tower.requires_grad_(False)
             self.vision_tower.eval()
-            print(f"❄️ [SigLIP] Backbone Frozen.")
+            print(f"❄️ [SigLIP State] 视觉塔模式: EVAL (冻结/推理)")
 
         self.is_loaded = True
 

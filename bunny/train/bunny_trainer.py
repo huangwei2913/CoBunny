@@ -130,9 +130,18 @@ class LengthGroupedSampler(Sampler):
 class BunnyTrainer(Trainer):
 
     def _get_train_sampler(self, dataset) -> Optional[torch.utils.data.Sampler]:
+
+        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            print("\n" + "🚀"*10)
+            print("DEBUG: BunnyTrainer._get_train_sampler 被触发了！")
+            print(f"DEBUG: group_by_modality_length 状态: {self.args.group_by_modality_length}")
+            print("🚀"*10 + "\n")
+
         if self.train_dataset is None or not has_length(self.train_dataset):
             return None
-
+        
+        #dict：{"train_dataset": ..., "eval_dataset": ..., "data_collator": ...}。
+        #在这里我们应该强制走这一个分支
         if self.args.group_by_modality_length:
             lengths = self.train_dataset.modality_lengths
             return LengthGroupedSampler(
@@ -142,6 +151,8 @@ class BunnyTrainer(Trainer):
                 group_by_modality=True,
             )
         else:
+            if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                print("⚠️ 警告：没有启用长度分组，将使用默认采样器。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。")
             return super()._get_train_sampler(dataset)
 
     def create_optimizer(self):

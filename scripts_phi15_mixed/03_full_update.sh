@@ -16,7 +16,7 @@ INCLUDE_STR="192.168.0.3:0,1,2,3,4,5,6,7"
 MODEL_TYPE="phi-1.5"
 BASE_MODEL="./checkpoints-finetune/bunny-phi1.5-mixed-lora-695k/checkpoint-23476"
 OUTPUT_DIR="./checkpoints-stage3/bunny-phi1.5-full-finetune-modified"  #我们重新设计了第三个阶段代码
-DATA_PATH="/mnt/conda_data/Bunny-v1.1-data/finetune/bunny_stage3_mixed_2M.json"
+DATA_PATH="/mnt/conda_data/Bunny-v1.1-data/finetune/bunny_stage3_cleaned.json"
 IMAGE_PATH="/"
 # 关键：指向 Stage 1 跑出来的那个包含 117 个 Key 的文件
 export PYTHONUNBUFFERED=1
@@ -74,6 +74,10 @@ deepspeed \
     --logging_steps 10 \
     --model_max_length 2048 \
     --gradient_checkpointing True \
+    --group_by_modality_length True \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \
     --report_to none 2>&1 | tee $OUTPUT_DIR/finetunefull.log
+
+
+###--group_by_modality_length True  这个必须要的

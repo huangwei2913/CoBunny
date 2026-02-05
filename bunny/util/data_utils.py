@@ -29,46 +29,41 @@ class DataArguments:
     image_aspect_ratio: str = field(default=None)
     mm_vision_tokens: int = field(default=365)  # 明确告诉数据加载器，视觉塔输出多少个tokens
 
-def preprocess_multimodal(
-        sources: Sequence[str],
-        data_args: DataArguments
-) -> Dict:
+#除了返回被替换成的<img_content>之外，我们还要每一个样本中的影像数量
+def preprocess_multimodal(sources, data_args):
     is_multimodal = data_args.is_multimodal
-    if not is_multimodal:
-        return sources
-
-    # 原始数据里的标签 (你 JSON 文件里写的是这个)
-    RAW_JSON_TAG = "<image>"  #被污染的占位符
+    RAW_JSON_TAG = "<image>"
 
     for source in sources:
+        # --- 重点 1: 无论如何，先给这个样本打个“零图”底色 ---
+        # 这样后面不管是纯文本，还是没匹配上，都不会报 KeyError
+        source[0]['num_images'] = 0 
+
+        if not is_multimodal:
+            continue
+
         for sentence in source:
-            # 检查是否有图像占位符
             if RAW_JSON_TAG in sentence['value']:
-                # 统计图片数量
                 num_images = sentence['value'].count(RAW_JSON_TAG)
                 
-                # 情况 A: 单图 (保持简单，直接替换为 <img_content>)
+                # --- 重点 2: 执行你的替换逻辑 ---
                 if num_images == 1:
-                    # 先替换成新 Token 名字
-                    new_val = sentence['value'].replace(RAW_JSON_TAG, DEFAULT_IMAGE_TOKEN)
-                    # 移除多余的换行符，确保 <img_content> 在最前面或最合适的位置
-                    # 这一步是为了防止 "<img_content>\n\nText" 这种双换行
-                    sentence['value'] = new_val.strip()
-                
-                # 情况 B: 多图 (注入 "Image 1:" 锚点)
+                    sentence['value'] = sentence['value'].replace(RAW_JSON_TAG, DEFAULT_IMAGE_TOKEN).strip()
                 elif num_images > 1:
                     parts = sentence['value'].split(RAW_JSON_TAG)
                     new_val = ""
                     for i in range(num_images):
-                        # 注入逻辑: "Image 1: <img_content> "
-                        # 注意末尾加个空格，帮助分词器隔离
                         new_val += f"{parts[i]}Image {i+1}: {DEFAULT_IMAGE_TOKEN} "
-                    
-                    new_val += parts[-1]
-                    sentence['value'] = new_val.strip()
-                    
+                    sentence['value'] = (new_val + parts[-1]).strip()
+                
+                # --- 重点 3: 只有真正匹配到图片了，才更新这个数字 ---
+                source[0]['num_images'] = num_images
+    
     return sources
-
+#用分词器得到每一个样本中的字符串对应的的input_ids和lables
+#每一个样本的
+#目前仅仅是支持目前的逻辑支持一个图片对应多个问题和回复（多轮对话）
+#conv.append_message 把整个对话历史都拼成了一个长字符串（prompt），然后整个 prompt 只包含一个 <image> 占位符。
 def preprocess(
         sources: Sequence[str],
         tokenizer: transformers.PreTrainedTokenizer,
@@ -140,210 +135,288 @@ def preprocess(
             
         target[cur_len:] = IGNORE_INDEX
 
+    # === 调试打印开始 ===
+    # 随机选一个样本看一眼（比如第一个）
+    debug_idx = 0 
+    debug_input = input_ids[debug_idx]
+    debug_label = targets[debug_idx]
+
+    print("\n" + "="*50)
+    print("🚀 [PREPROCESS DEBUG] 检查 Label 遮蔽是否精准:")
+    
+    decoded_output = []
+    for token_id, label_id in zip(debug_input, debug_label):
+        # 【修改这里】：如果 token_id 是负数（如图像 token -200），手动转成文本
+        if token_id < 0:
+            token_text = f"<IMG_{token_id}>"
+        else:
+            token_text = tokenizer.decode([token_id])
+        
+        if label_id == IGNORE_INDEX:
+            decoded_output.append(f"\033[90m{token_text}\033[0m")
+        else:
+            decoded_output.append(f"\033[92m{token_text}\033[0m")
+
+    print("".join(decoded_output))
+    print("="*50 + "\n")
+
+    input_ids = input_ids.view(-1)
+    targets = targets.view(-1)
+
     return dict(input_ids=input_ids, labels=targets)
 
 
+Image.MAX_IMAGE_PIXELS = None 
 class LazySupervisedDataset(Dataset):
     def __init__(self, data_path: str,
-                 tokenizer: transformers.PreTrainedTokenizer,
-                 data_args: DataArguments):
+                    tokenizer: transformers.PreTrainedTokenizer,
+                    data_args: DataArguments,
+                    list_data_dict=None
+                    ):
         super(LazySupervisedDataset, self).__init__()
-        
-        rank0_print(f"Loading data from {data_path}...")
-        list_data_dict = json.load(open(data_path, "r"))
-        
         self.tokenizer = tokenizer
         self.data_args = data_args
-        
-        # =================================================
-        # 🚨 长度过滤核心逻辑 (防止 2048 溢出导致幻觉)
-        # =================================================
-        # 1. 设置单图消耗的 Token 数 (双塔输出 365)
-        # 净增量 = 365 - 1 (原本的<img_content>占1个) = 364
-        self.num_image_tokens = getattr(data_args, 'mm_vision_tokens', 365) #我们的视觉塔最大输出多少个token
-        MAX_SEQ_LEN = tokenizer.model_max_length   
-        PATCH_TOKENS = self.num_image_tokens 
-        MAX_LEN = MAX_SEQ_LEN
+        self.num_image_tokens = getattr(data_args, 'mm_vision_tokens', 365)
+        MAX_SEQ_LEN = 2048  # 强制硬编码 2048，确保不溢出
+        # --- 这里的逻辑是关键 ---
+        if list_data_dict is not None:
+            # 如果外部传了切分好的名单（train_list 或 val_list），直接用
+            raw_data = list_data_dict
+        else:
+            # 2. 配置硬限制参数
+            raw_data = json.load(open(data_path, "r"))
 
+        self.list_data_dict = []
+        self.modality_lengths = []
+        # 3. 环境预处理：静音与安全设置
+        # 临时把 tokenizer 的限制调到无穷大，防止它在扫描时乱报“3480 > 2048”
+        old_max_len = tokenizer.model_max_length
+        tokenizer.model_max_length = 9999999 
+        # 允许 PIL 处理大图，我们手动过滤，不需要它报 Warning
+        Image.MAX_IMAGE_PIXELS = None 
+        rank0_print(f"📂 [Data Firewall] 正在深度扫描数据集: {data_path}")
         filtered_data = []
-        discarded_count = 0
-        
-        rank0_print("Filtering data based on token length...")
-        
-        for entry in list_data_dict:
+        # 计数器
+        stats = {"too_long": 0, "empty": 0, "bad_img": 0, "total": len(raw_data)}
+        for entry in raw_data:
+            # --- 【检查 1：空 Label 过滤】 ---
+            has_response = False
             full_text = ""
+            if 'conversations' not in entry:
+                stats["empty"] += 1
+                continue
+                
             for conv in entry['conversations']:
-                full_text += conv['value']
+                full_text += conv['value'] + " "
+                if conv['from'] in ['gpt', 'assistant']:
+                    if conv['value'] and conv['value'].strip():
+                        has_response = True
             
-            # 统计原始 JSON 里的图片数
+            if not has_response:
+                stats["empty"] += 1
+                continue
+
+            # --- 【检查 2：图片尺寸与安全性过滤】 ---
+            image_invalid = False
             num_imgs = full_text.count("<image>")
             
-            # 粗略计算文本长度 (字符数/3.5 是个经验值，或者直接用 encode 抽样)
-            # 为了精准，我们这里做个简单的字符串替换模拟
-            # "Image 1: " 大概占 4 个 token，如果多图，我们要加上这部分开销
-            anchor_overhead = num_imgs * 5 if num_imgs > 1 else 0
+            if 'image' in entry:
+                image_files = entry['image']
+                if not isinstance(image_files, list):
+                    image_files = [image_files]
+                
+                for img_path in image_files:
+                    try:
+                        if os.path.isabs(img_path) and os.path.exists(img_path):
+                            full_path = img_path
+                        else:
+                            full_path = os.path.join(self.data_args.image_folder, img_path)
+                      
+                        # 只读 Header，极快
+                        with Image.open(full_path) as img:
+                            w, h = img.size
+                            # 🚨 过滤条件：总像素 > 8000万 或 比例超过 15:1 (防止 OOM 和 畸变)
+                            if (w * h) > 80000000 or (w / h) > 15 or (h / w) > 15:
+                                image_invalid = True
+                                break
+                    except Exception:
+                        rank0_print(f"🚨 [文件损坏] 无法读取图片: {full_path}, 错误原因: {e}")
+                        image_invalid = True
+                        break
             
-            # 文本本身的 token 数 (不含图片特征)
-            text_tokens = len(tokenizer.encode(full_text))
-            
-            # 真实总长度 = 文本 + 锚点开销 + 图片特征占位
-            total_len = text_tokens + anchor_overhead + (num_imgs * (PATCH_TOKENS - 1))
-            
-            # 留一点 Buffer (比如 10 个 token)
-            if total_len < (MAX_LEN - 10):
-                filtered_data.append(entry)
-            else:
-                discarded_count += 1
+            if image_invalid:
+                stats["bad_img"] += 1
+                continue
 
+            # --- 【检查 3：Token 长度硬核扫描】 ---
+            # 暴力替换法：把 <image> 换成 365 个占位符，模拟真实进入 LLM 的状态
+            # 这里用 text_len 配合 image_overhead 复合计算，最稳
+            pure_text = full_text.replace("<image>", "")
+            text_token_ids = tokenizer.encode(pure_text, add_special_tokens=True)
+            text_len = len(text_token_ids)
+            
+            # 每个图片 365 tokens + 每个图片 45 个模板开销 (处理多图索引和换行)
+            total_real_len = text_len + (num_imgs * (self.num_image_tokens + 45))
+
+            # 严格截断：留出 48 个 token 冗余 (给 System Prompt 和 BOS/EOS)
+            if total_real_len > (MAX_SEQ_LEN - 48):
+                stats["too_long"] += 1
+                continue
+
+            # --- 恭喜：通过所有检查 ---
+            filtered_data.append(entry)
+            # 记录长度，供训练采样器实现 Efficient Batching
+            self.modality_lengths.append(total_real_len)
+
+        # 4. 恢复环境设置
+        tokenizer.model_max_length = old_max_len
         self.list_data_dict = filtered_data
-        rank0_print(f"Loaded {len(self.list_data_dict)} samples. Discarded {discarded_count} samples due to length.")
-        if not hasattr(self, 'modality_lengths'):
-        # 如果没有这个属性，我们根据是否存在 'image' 字段给出一个参考长度
-        # 图像 token 比较长，我们假设带图的为 1000，不带图的为 100
-            self.modality_lengths = []
-            for item in self.list_data_dict:
-                if 'image' in item:
-                    self.modality_lengths.append(400)
-                else:
-                    self.modality_lengths.append(100)
+        
+        # 5. 打印最终扫描报告
+        rank0_print(f"✅ [Data Firewall] 扫描完成！报告如下：")
+        rank0_print(f"   - 原始总数: {stats['total']}")
+        rank0_print(f"   - 最终保留: {len(self.list_data_dict)}")
+        rank0_print(f"   - 垃圾清理: {stats['total'] - len(self.list_data_dict)}")
+        rank0_print(f"     (其中 溢出:{stats['too_long']} | 空白:{stats['empty']} | 坏图:{stats['bad_img']} )")
+        
+        if len(self.list_data_dict) == 0:
+            rank0_print("🚨🚨🚨 极其严重警告：所有数据都被滤掉了！请检查路径或逻辑！")
 
     def __len__(self):
         return len(self.list_data_dict)
 
+
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        sources = self.list_data_dict[i]
-        if isinstance(i, int):
-            sources = [sources]
+        raw_entry = self.list_data_dict[i]
+        dialog_list = copy.deepcopy(raw_entry['conversations'])
+        sources = [dialog_list] # 包装成 [source]
+        
+        # 1. 文本与多模态占位符处理
+        has_image = 'image' in raw_entry
+        if has_image:
+            sources = preprocess_multimodal(sources, self.data_args)
+
+        # 这里 preprocess 吐出来的 data_dict 包含了 input_ids 和 labels
+        data_dict = preprocess(sources, self.tokenizer, has_image=has_image)
+
+        # =================================================================
+        # 🛡️ 核心质检逻辑：拦截“截断自杀”样本
+        # =================================================================
+        max_len = self.tokenizer.model_max_length
+        # 模拟 DataCollator 的截断操作，只看模型能看到的那部分 labels
+        truncated_labels = data_dict['labels'][:max_len]
+        
+        # 计算有效 Token 数（不等于 -100 的数量）
+        # 如果是 Tensor 就用 .eq(...).sum()，如果是 List 就用 count
+        if isinstance(truncated_labels, torch.Tensor):
+            valid_label_count = truncated_labels.ne(IGNORE_INDEX).sum().item()
+        else:
+            valid_label_count = sum(1 for x in truncated_labels if x != IGNORE_INDEX)
+
+        # 如果有效回答长度为 0，说明这个样本在截断后没东西可学
+        if valid_label_count == 0:
+            # 这里的 rank0_print 建议只在调试阶段开启，不然 22w 数据刷屏很快
+            # rank0_print(f"🚮 跳过样本 {i}: 提问太长导致回答被截断。正在寻找下一个...")
             
-        # ---------------------------------------------------------
-        # 🚨 高清“动态六子图”切分核心逻辑 (378x378 方案)
-        # ---------------------------------------------------------
-        if 'image' in sources[0]:
-            image_file = sources[0]['image']
+            # 递归调用：找下一个样本（取模防止越界）
+            # 注意：如果坏样本太多，可能导致递归过深，但在 22w 数据里一般不会
+            return self.__getitem__((i + 1) % len(self.list_data_dict))
+        
+        # =================================================================
+
+        # 2. 影像预处理核心逻辑 (只有活下来的样本才会走到这里，节省开销)
+        if has_image:
+            image_file = raw_entry['image']
             image_folder = self.data_args.image_folder
             processor = self.data_args.image_processor
-            
-            # 支持多图列表或单图路径
-            image_files = [image_file] if isinstance(image_file, str) else image_file
-            
-            pixel_values_list = []
-            target_sz = 378  # 设定子图标准尺寸
+            target_sz = 378
 
-            # 内部辅助函数：计算动态采样锚点，处理任意比例影像
+            if os.path.isabs(image_file) and os.path.exists(image_file):
+                img_path = image_file
+            else:
+                img_path = os.path.join(image_folder, image_file)
+
             def calculate_anchors(full_len, target_len):
                 if full_len <= target_len:
                     return [0, 0, 0, 0, 0]
                 max_scroll = full_len - target_len
-                return [
-                    0,                      # 起点 (左/上)
-                    max_scroll // 4,        # 1/4处
-                    max_scroll // 2,        # 中点
-                    3 * max_scroll // 4,    # 3/4处
-                    max_scroll              # 终点 (右/下)
+                return [0, max_scroll // 4, max_scroll // 2, 3 * max_scroll // 4, max_scroll]
+
+            try:
+                raw_image = Image.open(img_path).convert('RGB')
+                w, h = raw_image.size
+                global_img = raw_image.resize((target_sz, target_sz), Image.BILINEAR)
+                x_coords = calculate_anchors(w, target_sz)
+                y_coords = calculate_anchors(h, target_sz)
+                
+                crops = [
+                    raw_image.crop((x_coords[0], y_coords[0], x_coords[0] + target_sz, y_coords[0] + target_sz)),
+                    raw_image.crop((x_coords[4], y_coords[0], x_coords[4] + target_sz, y_coords[0] + target_sz)),
+                    raw_image.crop((x_coords[0], y_coords[4], x_coords[0] + target_sz, y_coords[4] + target_sz)),
+                    raw_image.crop((x_coords[4], y_coords[4], x_coords[4] + target_sz, y_coords[4] + target_sz)),
+                    raw_image.crop((x_coords[2], y_coords[2], x_coords[2] + target_sz, y_coords[2] + target_sz)),
                 ]
+                
+                six_images = [global_img] + crops
+                sub_image_dict = processor.preprocess(six_images, return_tensors='pt')
+                # 统一 Key 为 'image' (单数)，与 Collator 逻辑对齐
+                data_dict['image'] = sub_image_dict['pixel_values'].squeeze(0) if sub_image_dict['pixel_values'].dim() == 6 else sub_image_dict['pixel_values']
 
-            for img_path in image_files:
-                try:
-                    # 1. 加载原始高清图
-                    raw_image = Image.open(os.path.join(image_folder, img_path)).convert('RGB')
-                    w, h = raw_image.size
-                    
-                    # 2. 生成全局缩略图 (保持语义完整性)
-                    global_img = raw_image.resize((target_sz, target_sz), Image.BILINEAR)
-                    
-                    # 3. 计算动态锚点坐标
-                    x_coords = calculate_anchors(w, target_sz)
-                    y_coords = calculate_anchors(h, target_sz)
-                    
-                    # 4. 提取 5 个高清局部切片 (四角 + 绝对中心)
-                    # 这种方式直接从原图扣取像素，最大程度保留手机拍照细节
-                    crops = [
-                        raw_image.crop((x_coords[0], y_coords[0], x_coords[0] + target_sz, y_coords[0] + target_sz)), # 左上
-                        raw_image.crop((x_coords[4], y_coords[0], x_coords[4] + target_sz, y_coords[0] + target_sz)), # 右上
-                        raw_image.crop((x_coords[0], y_coords[4], x_coords[0] + target_sz, y_coords[4] + target_sz)), # 左下
-                        raw_image.crop((x_coords[4], y_coords[4], x_coords[4] + target_sz, y_coords[4] + target_sz)), # 右下
-                        raw_image.crop((x_coords[2], y_coords[2], x_coords[2] + target_sz, y_coords[2] + target_sz)), # 正中心
-                    ]
-                    
-                    # 5. 组合成 6 个子图序列并进行预处理
-                    six_images = [global_img] + crops
-                    # 对 6 张图执行 Normalize 和 ToTensor
-                    sub_image_dict = processor.preprocess(six_images, return_tensors='pt')
-                    
-                    # 堆叠为 [6, 2，3, ,374, 374] 的张量包
-                    pixel_values_list.append(sub_image_dict['pixel_values'])
-                    
-                except Exception as e:
-                    print(f"Error loading image: {img_path}, {e}")
-                    # 异常兜底：返回全黑的 6 子图张量
-                    pixel_values_list.append(torch.zeros(6, 2, 3, target_sz, target_sz))
-
-            # # 最终堆叠 [Num_Images, 6, 2, 3, 378, 378]
-            # 这确保了 Model Forward 能够接收到 6 维张量
-            image = torch.stack(pixel_values_list)
-            
-            # 调用原本的对话预处理逻辑
-            sources = preprocess_multimodal(copy.deepcopy([e["conversations"] for e in sources]), self.data_args)
-            
+            except Exception as e:
+                rank0_print(f"🚨 图片处理失败: {img_path}, 错误: {e}")
+                data_dict['image'] = torch.zeros(6, 2, 3, target_sz, target_sz)
         else:
-            sources = copy.deepcopy([e["conversations"] for e in sources])
-
-        # 文本 Tokenize 过程
-        data_dict = preprocess(
-            sources,
-            self.tokenizer,
-            has_image=('image' in self.list_data_dict[i]))
-            
-        if isinstance(i, int):
-            data_dict = dict(input_ids=data_dict["input_ids"][0],
-                                labels=data_dict["labels"][0])
-
-        # 将处理好的 6 维图像张量放入 data_dict
-        if 'image' in self.list_data_dict[i]:
-            data_dict['image'] = image
-        elif self.data_args.is_multimodal:
-            # 非图样本的兜底填充，保持维度一致
-            data_dict['image'] = torch.zeros(1, 6, 2, 3, 378, 378)
-            
+            data_dict['image'] = torch.zeros(6, 2, 3, 378, 378)
+        
         return data_dict
+
 # ---------------------------------------------------------
 # 数据整理器 (Padding)
+###
+## 将一批样本里面的所有样本都做inout_ids的对齐，lables的对齐
+###一批只不过送给一个gpu的样本数量
+###
 # ---------------------------------------------------------
 @dataclass
 class DataCollatorForSupervisedDataset(object):
     tokenizer: transformers.PreTrainedTokenizer
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-
+        # 0. 安全检查：Tokenizer 是否就绪
         pad_id = self.tokenizer.pad_token_id
         if pad_id is None:
-            # 这是一个紧急出口，提醒你必须去外层初始化它
-            raise ValueError("Tokenizer 缺少 pad_token！请确保在加载数据前执行了 tokenizer.add_tokens(['<pad>'])")
+            raise ValueError("🚨 Tokenizer 缺少 pad_token_id！请检查初始化代码。")
         
+        # 1. 提取 input_ids 和 labels
         input_ids, labels = tuple([instance[key] for instance in instances]
                                   for key in ("input_ids", "labels"))
         
-        # 这里的 Padding 使用你新加的 <pad> (ID 50296)
+        # 2. 强制对齐 (Padding)
+        # input_ids 使用 pad_token_id (50296) 填充
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids,
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id)
             
+        # labels 使用 -100 填充 (不计算 loss)
         labels = torch.nn.utils.rnn.pad_sequence(
             labels,
             batch_first=True,
             padding_value=IGNORE_INDEX)
 
-        # 再次截断，双重保险
-        input_ids = input_ids[:, :self.tokenizer.model_max_length]
-        labels = labels[:, :self.tokenizer.model_max_length]
+        # 3. 截断 (最大长度限制)
+        model_max_length = self.tokenizer.model_max_length
+        input_ids = input_ids[:, :model_max_length]
+        labels = labels[:, :model_max_length]
         
+        # 4. 构建 Batch
         batch = dict(
             input_ids=input_ids,
             labels=labels,
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
         )
 
+        # 5. 图像堆叠处理 [Batch, 6, 2, 3, 378, 378]
         if 'image' in instances[0]:
             images = [instance['image'] for instance in instances]
             if all(x is not None and x.shape == images[0].shape for x in images):
@@ -351,42 +424,106 @@ class DataCollatorForSupervisedDataset(object):
             else:
                 batch['images'] = images
 
+        # =================================================================
+        # 🔍 深度调试区 (修复了 RuntimeError 问题)
+        # =================================================================
+        
+        # [检查 A]：截断导致的 "全 -100" 风险
+        # 计算每一行有多少个有效 label (即不等于 -100 的个数)
+        # 使用 .long() 确保类型安全，使用 .tolist() 转为 Python 列表，彻底避免 Tensor Boolean Error
+        valid_counts = (labels != IGNORE_INDEX).sum(dim=1).long().tolist()
+        
+        has_zero_label_sample = False
+        for i, count in enumerate(valid_counts):
+            if count == 0:
+                has_zero_label_sample = True
+                # 这是一个严重警告：说明截断太狠，把回答切没了
+                rank0_print(f"🚨 [严重警告] 样本 {i} 的有效 Labels 数量为 0！(全被截断或原本就没有回答)")
+                rank0_print(f"   - Input 长度: {len(instances[i]['input_ids'])} -> 截断后: {input_ids.shape[1]}")
+
+        # [检查 B]：Padding 互补逻辑验证 (抽查第一个样本)
+        # 找到 input_ids 中所有 pad 的位置
+        first_sample_ids = input_ids[0]
+        first_sample_labels = labels[0]
+        
+        # 找到 input_ids 等于 pad_token_id 的索引
+        pad_indices = (first_sample_ids == pad_id).nonzero(as_tuple=True)[0]
+        
+        if len(pad_indices) > 0:
+            # 只检查第一个 pad 出现的位置，验证逻辑是否闭环
+            chk_idx = pad_indices[0].item()
+            
+            val_input = first_sample_ids[chk_idx].item()
+            val_label = first_sample_labels[chk_idx].item()
+            
+            # 打印验证信息
+            # 只有当 逻辑不对时 才打印警告，或者每隔一定步数打印一次（这里为了调试每次都打）
+            # 为了防止刷屏，你可以只在发现不对时打印，但我这里加上是为了让你安心
+            # print(f"🔍 [对齐检查] Index {chk_idx}: Input={val_input} (<pad>), Label={val_label} (-100)")
+            
+            if val_input == pad_id and val_label != IGNORE_INDEX:
+                raise ValueError(f"🚨 Padding 逻辑崩溃！Input 是 <pad> ({val_input}) 但 Label 竟然是 {val_label} (不是 -100)！模型会学到错误的东西！")
+        
+        # [检查 C]：维度检查
+        if 'images' in batch and isinstance(batch['images'], torch.Tensor):
+             # 确保维度是 6 维
+             if batch['images'].dim() != 6:
+                 rank0_print(f"⚠️ [图像维度警告] 期望 6 维，实际得到: {batch['images'].shape}")
+
+
+        # --- 🚀 终极监控点 ---
+        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            print("\n" + "🚚" * 10)
+            print("【DataCollator 发货质检..............................................】")
+            if 'images' in batch:
+                print(f"   - 图像批次维度 (Images Shape): {batch['images'].shape}")
+                # 预期应该是 [Batch, 6, 2, 3, 378, 378]
+            if 'input_ids' in batch:
+                print(f"   - 文本批次维度 (Input_ids Shape): {batch['input_ids'].shape}")
+                # 这里的 SeqLen 应该是这个 Batch 里最长样本的长度
+            print("🚚" * 10 + "\n")
+
+
         return batch
 
 def make_supervised_data_module(tokenizer, data_args) -> Dict:
-    rank0_print("📂 [Data] 正在加载全量数据集 (2M)...")
+    rank0_print("📂 [Data] 正在读取数据名单...")
     
-    full_dataset = LazySupervisedDataset(
+    # 1. 先读出原始的 list_data_dict (这是最轻量级的字符串列表)
+    import json
+    list_data_dict = json.load(open(data_args.data_path, "r"))
+    
+    # 2. 手动切分名单
+    import random
+    random.seed(42)
+    random.shuffle(list_data_dict) # 随机打乱
+    
+    val_size = 2000
+    val_list = list_data_dict[:val_size]
+    train_list = list_data_dict[val_size:]
+    
+    rank0_print(f"📂 [Data] 名单切分完成: 训练集 {len(train_list)}, 验证集 {len(val_list)}")
+
+    # 3. 分别创建两个独立的 LazySupervisedDataset 实例
+    # 修改你的 Dataset 类，让它支持直接传入 list_data 而不是只读路径
+    train_dataset = LazySupervisedDataset(
+        tokenizer=tokenizer,
+        data_path=data_args.data_path, # 路径留着备用
+        data_args=data_args,
+        list_data_dict=train_list  # 直接传切好的列表
+    )
+    
+    eval_dataset = LazySupervisedDataset(
         tokenizer=tokenizer,
         data_path=data_args.data_path,
-        data_args=data_args
+        data_args=data_args,
+        list_data_dict=val_list
     )
-    
-    # --- 采用最稳健的切分方式，不使用随机索引拷贝 ---
-    val_size = 2000
-    train_size = len(full_dataset) - val_size
-    
-    # random_split 本身很快
-    train_dataset, eval_dataset = torch.utils.data.random_split(
-        full_dataset, [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
-    )
-
-    # 关键补丁：只引用大列表，不进行循环拷贝！
-    # 这样既保证了属性存在，又避免了 200 万次循环导致的悬停
-    for dataset in [train_dataset, eval_dataset]:
-        dataset.data_args = full_dataset.data_args
-        dataset.modality_lengths = full_dataset.modality_lengths
-        dataset.list_data_dict = full_dataset.list_data_dict
-        dataset.tokenizer = full_dataset.tokenizer
 
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
-    
-    rank0_print(f"✅ [Data] 准备就绪，开始训练...")
     
     return dict(
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator
     )
-

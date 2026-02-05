@@ -40,6 +40,7 @@ bunny/model/language_model/stage2finedtunedwithlora.py
 bunny/model/language_model/stage2finetuned.py
 bunny/model/language_model/stage2modifyied.py
 bunny/model/language_model/stage3full.py
+bunny/model/language_model/stage3fullmodified.py
 bunny/model/language_model/test.py
 bunny/model/language_model/llama/__init__.py
 bunny/model/language_model/llama/configuration_llama.py

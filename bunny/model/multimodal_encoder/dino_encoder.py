@@ -70,7 +70,6 @@ class DinoVisionTower(BaseVisionTower):
         self._image_size = 384    # DinoV3 默认常用尺寸
         self._patch_size = 16 
         self._num_patches_cached = None 
-        self.select_feature = getattr(args, "mm_vision_select_feature", "cls_patch")
         
         self.model_name = "dinounet_b"
         self.interaction_indexes = [2, 5, 8, 11]
@@ -93,78 +92,101 @@ class DinoVisionTower(BaseVisionTower):
         if not self.delay_load:
             self.load_model()
 
+
     def load_model(self, device_map=None):
-        # 从外部工具函数加载 Backbone
-        self.vision_tower = load_dinov3_model(self.model_name, self.pretrained_path)
+        # 1. 灵魂探测：利用 Python 反射机制检查 builder.py 是否已完成权重注入
+        has_soul = False
         
-        # 转移到正确的设备和精度
+        # 检查属性是否存在（空降属性检查）
+        if hasattr(self, 'vision_tower') and self.vision_tower is not None:
+            try:
+                # 获取第一个参数的权重分布
+                param = next(self.vision_tower.parameters())
+                # 如果 std != 1.0，说明这是一个被训练过或从 checkpoint 恢复的有灵魂的权重
+                if param.numel() > 0 and torch.std(param.data).item() != 1.0:
+                    has_soul = True
+            except (StopIteration, AttributeError):
+                pass
+
+        # 2. 决策：如果有灵魂，坚决不加载底座，防止 0.65 成果被官方权重“污染”
+        if has_soul:
+            print(f"🚀 [DINO Safe Load] 确认：微调后的视觉灵魂已由外部注入，拒绝官方底座覆盖。")
+        else:
+            # 只有在架构确实为空（如 Stage 1）或注入失败时，才执行手动加载
+            print(f"🏗️ [DINO Initial Load] 探测不到有效权重，正在加载官方底座: {self.model_name}")
+            # 这里调用你原来的加载工具函数
+            self.vision_tower = load_dinov3_model(self.model_name, self.pretrained_path)
+
+        # 3. 意志同步：状态对齐与 T4 硬件适配 (Tesla T4 推理必须强制 FP16)
         self.vision_tower.to(device=self.device, dtype=torch.float16)
-        
-        # 冻结或解冻
-        self.vision_tower.requires_grad_(self.unfreeze_mm_vision_tower)
-        
-        # 加载图像处理器
+
+        if self.unfreeze_mm_vision_tower:
+            self.vision_tower.requires_grad_(True)
+            self.vision_tower.train()  # 必须开启训练模式以支持反向传播
+            print(f"🔥 [DINO State] Full Parameter Fine-tuning Enabled (TRAIN模式).")
+        else:
+            self.vision_tower.requires_grad_(False)
+            self.vision_tower.eval()   # 推理模式
+            print(f"❄️ [DINO State] Inference Mode Enabled (EVAL模式).")
+
+        # 4. 补全预处理器（注入机制通常不带这个）
         self.image_processor = AutoImageProcessor.from_pretrained(self._vision_tower_name)
-        
+            
         self.is_loaded = True
 
     def _forward(self, images):
         # 确保输入精度一致
         images = images.to(device=self.device, dtype=self.dtype)
+        # 获取 4 层中间层特征 (List of Tuple: (feat, cls))
+        all_layers = self.vision_tower.get_intermediate_layers(
+            images, n=self.interaction_indexes, return_class_token=True
+        )
+        aligned_layers = []
+        for layer_out in all_layers:
+            if isinstance(layer_out, tuple):
+                feat, cls = layer_out
+            else:
+                feat, cls = layer_out, None
+            
+            # 确保精度
+            feat = feat.to(images.dtype)
+            if cls is not None:
+                cls = cls.to(images.dtype)
+
+            # 维度处理: [B, H, W, C] -> [B, T, C]
+            if feat.dim() == 4:
+                B, C, H, W = feat.shape
+                feat = feat.view(B, C, H * W).permute(0, 2, 1)
+            
+            # 空间插值对齐到 target_N (如 24x24=576)
+            if feat.shape[1] != self.target_N:
+                # [B, T, C] -> [B, C, T] -> [B, C, target_N] -> [B, target_N, C]
+                feat = F.interpolate(
+                    feat.permute(0, 2, 1),
+                    size=self.target_N,
+                    mode="linear",
+                    align_corners=False
+                ).permute(0, 2, 1).contiguous()
+
+            # 拼接 CLS Token: [B, 1, C] + [B, target_N, C] -> [B, 1+target_N, C]
+            if cls is not None:
+                cls_tokens = cls.unsqueeze(1)
+                feat_with_cls = torch.cat([cls_tokens, feat], dim=1)
+            else:
+                # 如果没有 CLS，伪造一个均值池化 CLS 保证混合编码器结构统一
+                pseudo_cls = feat.mean(dim=1, keepdim=True)
+                feat_with_cls = torch.cat([pseudo_cls, feat], dim=1)
+                
+            aligned_layers.append(feat_with_cls)
+
+        # 拼接所有选定层的特征
+        all_intermediate_features = torch.cat(aligned_layers, dim=1)
         
-        with torch.autocast("cuda", torch.float16):
-            with torch.no_grad():
-                # 获取 4 层中间层特征 (List of Tuple: (feat, cls))
-                all_layers = self.vision_tower.get_intermediate_layers(
-                    images, n=self.interaction_indexes, return_class_token=True
-                )
-                
-                aligned_layers = []
-                for layer_out in all_layers:
-                    if isinstance(layer_out, tuple):
-                        feat, cls = layer_out
-                    else:
-                        feat, cls = layer_out, None
-                    
-                    # 确保精度
-                    feat = feat.to(images.dtype)
-                    if cls is not None:
-                        cls = cls.to(images.dtype)
+        # 更新缓存的 Patch 数量 (不含 CLS)
+        if self._num_patches_cached is None:
+            self._num_patches_cached = self.target_N
 
-                    # 维度处理: [B, H, W, C] -> [B, T, C]
-                    if feat.dim() == 4:
-                        B, C, H, W = feat.shape
-                        feat = feat.view(B, C, H * W).permute(0, 2, 1)
-                    
-                    # 空间插值对齐到 target_N (如 24x24=576)
-                    if feat.shape[1] != self.target_N:
-                        # [B, T, C] -> [B, C, T] -> [B, C, target_N] -> [B, target_N, C]
-                        feat = F.interpolate(
-                            feat.permute(0, 2, 1),
-                            size=self.target_N,
-                            mode="linear",
-                            align_corners=False
-                        ).permute(0, 2, 1).contiguous()
-
-                    # 拼接 CLS Token: [B, 1, C] + [B, target_N, C] -> [B, 1+target_N, C]
-                    if cls is not None:
-                        cls_tokens = cls.unsqueeze(1)
-                        feat_with_cls = torch.cat([cls_tokens, feat], dim=1)
-                    else:
-                        # 如果没有 CLS，伪造一个均值池化 CLS 保证混合编码器结构统一
-                        pseudo_cls = feat.mean(dim=1, keepdim=True)
-                        feat_with_cls = torch.cat([pseudo_cls, feat], dim=1)
-                        
-                    aligned_layers.append(feat_with_cls)
-
-                # 拼接所有选定层的特征
-                all_intermediate_features = torch.cat(aligned_layers, dim=1)
-                
-                # 更新缓存的 Patch 数量 (不含 CLS)
-                if self._num_patches_cached is None:
-                    self._num_patches_cached = self.target_N
-
-                return aligned_layers[-1], all_intermediate_features
+        return aligned_layers[-1], all_intermediate_features
 
     # --- 必须保留的核心属性 ---
     

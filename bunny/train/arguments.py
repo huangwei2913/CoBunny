@@ -23,7 +23,6 @@ class ModelArguments:
     mm_mask_drop_ratio: float = field(default=0.25)
     mm_mask_drop_ratio_upper: Optional[float] = field(default=None)
     mm_mask_drop_ratio_lower: Optional[float] = field(default=None)
-    mm_vision_select_feature: Optional[str] = field(default="patch")
     mm_dense_connector_type: Optional[str] = field(default='dci')  #密集投影层类型
     vision_tower_dino: Optional[str] = field(default=None, metadata={"help": "DINOv2 子塔的权重路径"})
     vision_tower_siglip: Optional[str] = field(
@@ -43,7 +42,7 @@ class TrainingArguments(transformers.TrainingArguments):
     save_mm_vision_tower: bool = field(default=False) #增加一个是否保留视觉塔模型部分的参数
     mpt_attn_impl: Optional[str] = field(default="triton")
     model_max_length: int = field(
-        default=512,
+        default=2048,
         metadata={
             "help":
                 "Maximum sequence length. Sequences will be right padded (and possibly truncated)."
