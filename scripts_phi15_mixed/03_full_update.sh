@@ -66,10 +66,10 @@ deepspeed \
     --save_strategy "steps" \
     --save_steps 1000 \
     --save_total_limit 10 \
-    --learning_rate 2e-5 \
+    --learning_rate 1e-7 \
     --max_grad_norm 1.0 \
     --weight_decay 0. \
-    --warmup_ratio 0.1 \
+    --warmup_ratio 0.2 \
     --lr_scheduler_type "cosine" \
     --logging_steps 10 \
     --model_max_length 2048 \

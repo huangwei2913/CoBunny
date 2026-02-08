@@ -9,6 +9,101 @@ from PIL import Image
 from torchvision import transforms
 from typing import Dict, List, Union, Optional
 
+
+
+class FoveatedAnchorSampler(nn.Module):
+    def __init__(self, embed_dim=1024):
+        super().__init__()
+        # --- 核心改动：适配强制对齐后的 24x24 特征网格 ---
+        self.grid_size = 24   # 对应 378 分辨率下被 interpolate 后的特征大小
+        self.full_grid = 48   # 24 * 2 = 48 (2x2 拼接的大图)
+        
+        # 定义 48x48 的全局位置编码表
+        self.global_pos_embed = nn.Parameter(torch.randn(1, self.full_grid**2, embed_dim) * 0.02)
+        
+        # 评分器：决定哪些 Patch 值得留下
+        # 改进：输入 1024 -> 映射 -> 1 (Score)
+        self.scorer = nn.Sequential(
+            nn.Linear(embed_dim, 256),
+            nn.GELU(),
+            nn.Linear(256, 1)
+        )
+
+    def get_crop_pos_embeds(self):
+        """
+        在 48x48 的棋盘上切出 5 个子图的位置编码
+        """
+        B = 1
+        grid = self.global_pos_embed.view(B, self.full_grid, self.full_grid, -1) # [1, 48, 48, D]
+        G = self.grid_size # 24
+        
+        # 1. 四个角落 (严丝合缝覆盖 48x48)
+        pos_tl = grid[:, 0:G, 0:G, :].reshape(B, G*G, -1)   # 左上
+        pos_tr = grid[:, 0:G, G:, :].reshape(B, G*G, -1)    # 右上
+        pos_bl = grid[:, G:, 0:G, :].reshape(B, G*G, -1)    # 左下
+        pos_br = grid[:, G:, G:, :].reshape(B, G*G, -1)     # 右下
+        
+        # 2. 中间子图 (Center Crop)
+        # 逻辑：大图中心点是 24。
+        # 24x24 的中心图范围是 [24-12 : 24+12] = [12 : 36]
+        pos_center = grid[:, 12:36, 12:36, :].reshape(B, G*G, -1)
+        
+        return pos_tl, pos_tr, pos_bl, pos_br, pos_center
+
+    def forward(self, center_feat, corner_feats, num_topk=210):
+        """
+        center_feat: [B, 576, 1024] (不含 CLS)
+        corner_feats: [B, 4, 576, 1024] (不含 CLS)
+        """
+        B = center_feat.shape[0]
+        # 获取坐标纹身
+        p_tl, p_tr, p_bl, p_br, p_center = self.get_crop_pos_embeds()
+        
+        # --- A. 注入坐标 (让 Patch 知道自己的物理位置) ---
+        center_feat = center_feat + p_center
+        
+        # 给 4 个角落分别加坐标 (注意 corner_feats 是 4 维张量)
+        # corner_feats: [B, 4, 576, D]
+        corner_feats[:, 0] += p_tl
+        corner_feats[:, 1] += p_tr
+        corner_feats[:, 2] += p_bl
+        corner_feats[:, 3] += p_br
+        
+        # --- B. 锚点准备 (中间图压成 12x12 = 144 Token) ---
+        # 24x24 -> pooling -> 12x12 (完美的 2 倍下采样)
+        center_base = F.adaptive_avg_pool2d(
+            center_feat.transpose(1, 2).view(B, -1, 24, 24), (12, 12)
+        ).flatten(2).transpose(1, 2) # [B, 144, 1024]
+
+        # --- C. 筛选角落的“价值地块” ---
+        all_corners = corner_feats.view(B, -1, 1024) # [B, 4*576=2304, 1024]
+        
+        # 评分机制：Center-Guided Saliency
+        # 1. 计算中心图的全局摘要
+        center_summary = center_feat.mean(dim=1, keepdim=True) # [B, 1, 1024]
+        
+        # 2. 自身显著性 (Self-Saliency): 这个 Patch 本身包含丰富信息吗？
+        saliency_scores = self.scorer(all_corners).squeeze(-1) # [B, 2304]
+        
+        # 3. 中心相关性 (Relevance): 这个 Patch 和中心图有关联吗？
+        # 使用简单的点积注意力
+        relevance_scores = torch.matmul(all_corners, center_summary.transpose(1, 2)).squeeze(-1) # [B, 2304]
+        
+        # 4. 融合分数 (你可以调整权重，这里 1:1)
+        final_scores = saliency_scores + relevance_scores
+
+        # Top-K 采样
+        _, top_indices = torch.topk(final_scores, k=num_topk, dim=1)
+        
+        # 提取高价值 Patch (带着坐标纹身一起提取)
+        selected_patches = torch.gather(
+            all_corners, 1, top_indices.unsqueeze(-1).expand(-1, -1, 1024)
+        ) # [B, 210, 1024]
+        
+        return center_base, selected_patches
+
+
+
 class WeightedPseudoCLSHead(nn.Module):
     def __init__(self, dim, hidden_dim_ratio=2):
         super().__init__()
@@ -96,7 +191,27 @@ class AdaptiveConcatenationVisionTower(nn.Module):
             nn.Linear(self.siglip_vision_tower.hidden_size, self.global_dimension)
         ])
 
-        self._init_interaction_modules()
+        self.dino_projector = nn.Linear(768, 1024)   #两个视觉编码器融合前需要对齐维度数，dino通常返回的是768维度
+        self.siglip_projector = nn.Linear(1152, 1024)  ##两个视觉编码器融合前需要对齐维度数，siglip通常返回的是1152维度
+        self.saliency_sampler = FoveatedAnchorSampler(embed_dim=self.global_dimension)
+        self.cross_attn_dino_q = nn.ModuleList([
+            CrossAttentionBlock(dim=1024, num_heads=self.num_heads) for _ in range(self.dino_vision_tower.layer_count)
+        ])
+
+        # path_B: SigLIP as Query
+        self.cross_attn_siglip_q = nn.ModuleList([
+            CrossAttentionBlock(dim=1024, num_heads=self.num_heads) for _ in range(self.dino_vision_tower.layer_count)
+        ])
+
+        #针对于全局图的多层自适应增强cls token
+        self.gate_mlps = nn.ModuleList([
+            nn.Sequential(
+            nn.Linear(2048, 512),
+            nn.GELU(),
+            nn.Linear(512, 1) # 输出标量权重
+            ) for _ in range(self.dino_vision_tower.layer_count)
+        ])
+
         if not delay_load: 
             self.load_model()
 
@@ -119,17 +234,6 @@ class AdaptiveConcatenationVisionTower(nn.Module):
                 else:
                     sub_tower.requires_grad_(False)
                     sub_tower.eval()
-
-
-    def _init_interaction_modules(self):
-        self.N_layer_A = self.dino_vision_tower.layer_count 
-        self.multi_cls_cross_attn_blocks_A = nn.ModuleList([CrossAttentionBlock(self.global_dimension, self.num_heads, self.mlp_ratio) for _ in range(self.N_layer_A)])
-        self.dino_cls_attn_weights = nn.Parameter(torch.ones(self.N_layer_A))
-        self.N_layer_B = self.siglip_vision_tower.layer_count 
-        self.b_pseudo_cls_head = WeightedPseudoCLSHead(self.global_dimension) 
-        self.multi_cls_cross_attn_blocks_B = nn.ModuleList([CrossAttentionBlock(self.global_dimension, self.num_heads, self.mlp_ratio) for _ in range(self.N_layer_B)])
-        self.oryx_cls_attn_weights = nn.Parameter(torch.ones(self.N_layer_B))
-        self.final_cls_weights = nn.Parameter(torch.ones(2))
 
     def load_model(self):
 
@@ -183,137 +287,224 @@ class AdaptiveConcatenationVisionTower(nn.Module):
     
 
     def forward(self, images):
-        # =================================================================
-        # 1. 维度归一化：处理 Tensor、List 以及各种套娃维度
-        # =================================================================
-        if isinstance(images, dict): 
-            images = images.get("pixel_values", images)
+
+        ###############################################################################################
+        # 判断传递过来的输入是否符合要求
+        # #############################################################################################        
+        try:
+            rank = torch.distributed.get_rank()
+        except Exception:
+            rank = 0 # 如果不是分布式训练，默认为 0
+
+        # 只有 Rank 0 负责“发声”
+        if rank == 0:
+            if not hasattr(self, "has_printed_shape"):
+                print("\n" + "👁️" * 15 + " RANK 0 独家质检 " + "👁️" * 15)
+                print(f"🚀 [VISION TOWER ENTRY]")
+                print(f"   - Images Shape: {images.shape}")
+                
+                # 顺便检查一下数据在哪张卡上
+                print(f"   - Device: {images.device}") 
+                
+                # 检查一下数值范围，确保没有溢出或全零
+                print(f"   - Mean Value: {images.mean().item():.4f}") 
+                
+                print("👁️" * 40 + "\n")
+            self.has_printed_shape = True
+
+
+       
+        ###############################################################################################
+        # 得到4个全局增强cls tokens
+        # #############################################################################################        
+        b, num_crops, num_towers, c, h, w = images.shape
+        dino_input = images[:, :, 0]   # [B, 6, 3, 378, 378]
+        siglip_input = images[:, :, 1] # [B, 6, 3, 378, 378]
         
-        # 🚨 变量初始化，防止任何条件分支下的 NameError
-        is_multi_view = False
-        Num_Views = 6  
-        n_enc = 2      # 双塔 (DINO + SigLIP)
-        c, h, w = 3, 378, 378 # 强制对齐 378 物理维度
+        dino_input = dino_input.view(-1, c, h, w)
+        siglip_input = siglip_input.view(-1, c, h, w)
 
-        # 处理 DataCollator 堆叠失败返回的 List 情况
-        if isinstance(images, list):
-            # 只要子图都是 378，这里 cat 就能把 [2,6...] 和 [1,6...] 拼成 [3,6...]
-            images = torch.cat(images, dim=0) 
-        
-        if not isinstance(images, torch.Tensor):
-            images = self.image_processor.preprocess(images, return_tensors='pt')["pixel_values"]
+        # 4. 一次性喂给视觉塔 (GPU 会并行的处理这 B*6 张图)
+        # dino_out: [B*6, 577, 768] (假设返回的是最后一层)
+        # dino_gallery: [B*6, 4*577, 768] (假设是 4 层索引库)
+        dino_out, dino_gallery = self.dino_vision_tower(dino_input)
 
-        images = images.to(device=self.device, dtype=self.dtype)
+        # siglip_out: [B*6, 577, 1152](这里返回的是最后一层)
+        # siglip_gallery: [B*6, 8*577, 1152](假设是 8 层索引库)
+        siglip_out, siglip_gallery = self.siglip_vision_tower(siglip_input)
 
-        # 核心逻辑：利用 numel 暴力推算总图数，管它是几维，统一摊平
-        # 这样无论输入是 [B, N, 6, 2, 3, 378, 378] 还是 [Total_B_Views, 2, 3, 378, 378] 都能处理
-        Total_B = images.numel() // (n_enc * c * h * w)
-        
-        # 💡 自动判断是否需要执行 6->1 视图融合
-        # 逻辑：如果图片总数能被 6 整除，且大于 0，我们假设它是 6 视图模式
-        if Total_B >= Num_Views and Total_B % Num_Views == 0:
-            is_multi_view = True
+        dino_gallery = dino_gallery.view(b, num_crops, -1, dino_gallery.shape[-1]) #再转换成[B,6,4*577,768]
+        siglip_gallery = siglip_gallery.view(b, num_crops, -1, siglip_gallery.shape[-1]) #优雅的转换回来[B,6,8*577,1152]
 
-        # 强制平铺为 [总单图数, 2, 3, 378, 378]
-        images = images.view(Total_B, n_enc, c, h, w)
+        all_dino_feats = self.dino_projector(dino_gallery) 
+        all_siglip_feats = self.siglip_projector(siglip_gallery)
 
-        # 索引解包：0 给 DINO，1 给 SigLIP
-        dino_input = images[:, 0].contiguous()
-        siglip_input = images[:, 1].contiguous()
+        g_dino_feat = all_dino_feats[:, 0]  ## [B, 2308, 1024]
+        g_siglip_feat = all_siglip_feats[:, 0]  # [B, 4616, 1024]
 
-        # =================================================================
-        # 2. 特征提取与多层拆分
-        # =================================================================
-        _, A_inter = self.dino_vision_tower(dino_input)
-        _, B_inter = self.siglip_vision_tower(siglip_input)
-        
-        A_proj = self.mlp_layers[0](A_inter.to(self.dtype))
-        del A_inter
-        B_proj = self.mlp_layers[1](B_inter.to(self.dtype)) 
-        del B_inter
-        # 这里的 1000 是个阈值，用来区分“单层特征”还是“多层拼接特征”
-        if self.N_layer_A > 1: 
-            L_per_layer = A_proj.shape[1] // self.N_layer_A
-            A_full = A_proj.view(Total_B, self.N_layer_A, L_per_layer, -1)
-            B_full = B_proj.view(Total_B, self.N_layer_B, L_per_layer, -1)
+        # --- 3. 结构重组 (Reshape to Layers) ---
+        # DINOv3 (4层, 每层 1个CLS + 576 Patches = 577)
+        B, _, D_common = g_dino_feat.shape   #都转换成1024维度
+        dino_layers = g_dino_feat.view(B, self.dino_vision_tower.layer_count, 577, D_common)
+        dino_cls_tokens = dino_layers[:, :, 0:1, :]   # [B, 4, 1, D] -> 这是 DINO 的“指挥官”
+        dino_patches    = dino_layers[:, :, 1:, :]    # [B, 4, 576, D] -> 这是 DINO 的“躯干”
+
+        siglip_layers = g_siglip_feat.view(B, self.siglip_vision_tower.layer_count, 577, D_common)
+        siglip_cls_tokens = siglip_layers[:, :, 0:1, :] # [B, 8, 1, D] -> 这是 SigLIP 的“伪指挥官”
+        siglip_patches    = siglip_layers[:, :, 1:, :]  # [B, 8, 576, D] -> 这是 SigLIP 的“躯干”
+
+        #使用层对层对层（Layer-to-Layer） 是为了保证 Query 和 Key 在“语义高度”上是相对匹配的。
+        enhanced_global_tokens_list = []
+        for i in range(4):
+            # === 准备数据 ===
+            # DINO 方：取第 i 层
+            curr_dino_cls = dino_cls_tokens[:, i, :, :]  # Query A: [B, 1, D]
+            curr_dino_pat = dino_patches[:, i, :, :]     # Key/Value B: [B, 576, D]
+
+            # SigLIP 方：取第 2*i 和 2*i+1 层 (2对1策略)
+            # 将两层的 Patch 拼起来，提供更丰富的信息源
+            curr_siglip_pat = torch.cat([
+                siglip_patches[:, 2*i, :, :], 
+                siglip_patches[:, 2*i+1, :, :]
+            ], dim=1) # Key/Value A: [B, 576*2, D]
             
-            A_cls, A_patches = A_full[:, :, 0:1, :], A_full[:, :, 1:, :] 
-            B_patches = B_full[:, :, 1:, :]
-            T_actual = L_per_layer - 1 # 减去 CLS 后的 patch 数
-        else:
-            # 兜底：处理单层或非标准特征
-            A_cls = A_proj.mean(dim=1, keepdim=True).unsqueeze(1)
-            A_patches = A_proj.unsqueeze(1)
-            B_patches = B_proj.unsqueeze(1)
-            T_actual = A_proj.shape[1]
+            # 将两层的 CLS 平均一下，做一个超级语义 Query
+            curr_siglip_cls = (siglip_cls_tokens[:, 2*i, :, :] + siglip_cls_tokens[:, 2*i+1, :, :]) * 0.5
+            # Query B: [B, 1, D]
 
-        # 锁定当前处理的层数，防止后续 index 越界
-        N_A = self.N_layer_A if A_proj.shape[1] > 1000 else 1
-        N_B = self.N_layer_B if A_proj.shape[1] > 1000 else 1
+            combined_dino_in = torch.cat([curr_dino_cls, curr_siglip_pat], dim=1)
+            # === 交互 A: DINO 主动吸收 SigLIP 语义 ===
+            # DINO CLS 问 SigLIP Patches: "这里面是什么物体？"
+            # self.cross_attn_dino_q[i] 是一个 CrossAttentionBlock
+            dino_enhanced = self.cross_attn_dino_q[i](combined_dino_in) # [B, 1, D]
 
-        # =================================================================
-        # 3. 压缩与交互 (Cross-Attention)
-        # =================================================================
-        target_context = T_actual // self.compression_K
+            combined_siglip_in = torch.cat([curr_siglip_cls, curr_dino_pat], dim=1)
+            # === 交互 B: SigLIP 借用 DINO 骨架 ===
+            # SigLIP CLS 问 DINO Patches: "这个物体边界在哪？"
+            siglip_enhanced = self.cross_attn_siglip_q[i](combined_siglip_in) # [B, 1, D]
+
+            # === 动态权重融合 (Adaptive Gating) ===
+            # 拼接两者，计算一个 0~1 的权重 alpha
+            gate_input = torch.cat([dino_enhanced, siglip_enhanced], dim=-1) # [B, 1, 2*D]
+            alpha = torch.sigmoid(self.gate_mlps[i](gate_input)) # [B, 1, 1]
+            
+            # 融合：得到这一层最强的 Global Token
+            combined_token = alpha * dino_enhanced + (1 - alpha) * siglip_enhanced
+            enhanced_global_tokens_list.append(combined_token)
+
+
+        final_global_cls_tokens = torch.cat(enhanced_global_tokens_list, dim=1)  #[B, 4, 1024]
+        if rank == 0 and not hasattr(self, "has_printed_fusion"):
+            print(f"🔥 [FUSION] Global CLS Fusion Complete. Shape: {final_global_cls_tokens.shape}")
+            self.has_printed_fusion = True
+
+        ###############################################################################################
+        # 第二个阶段
+        # #############################################################################################        
+        # =========================================================
+        # 🔍 阶段二：肉体采样准备 (Sampling Preparation)
+        # =========================================================
+
+        # 1. 获取通用维度信息
+        B = all_dino_feats.shape[0]
+        D_common = 1024  # 投影后的统一维度
+        num_patches = 576 # 24x24 (不含 CLS)
+        total_tokens_per_layer = num_patches + 1 # 577 (含 CLS)
+
+        # 获取动态层数 (这是关键！DINO是4，SigLIP是8)
+        num_layers_dino = self.dino_vision_tower.layer_count   # 4
+        num_layers_siglip = self.siglip_vision_tower.layer_count # 8
+
+        # ---------------------------------------------------------
+        # A. 处理中间子图 (Center Crop, Index 5)
+        # ---------------------------------------------------------
+
+        # [A1] 提取 DINO 中间图
+        # 原始数据: [B, 4*577, 1024] -> Reshape 为 [B, 4层, 577个, 1024]
+        center_dino_raw = all_dino_feats[:, 5]
+        center_dino_reshaped = center_dino_raw.view(B, num_layers_dino, total_tokens_per_layer, D_common)
+
+        # [A2] 提取 SigLIP 中间图 (注意这里用 num_layers_siglip = 8)
+        # 原始数据: [B, 8*577, 1024] -> Reshape 为 [B, 8层, 577个, 1024]
+        center_siglip_raw = all_siglip_feats[:, 5]
+        center_siglip_reshaped = center_siglip_raw.view(B, num_layers_siglip, total_tokens_per_layer, D_common)
+
+        # [A3] 精准切片：只取各自的“最后一层” + “纯 Patch”
+        # DINO: 取第 4 层 (index -1), 去掉第一个 CLS (index 1:)
+        c_dino_last = center_dino_reshaped[:, -1, 1:, :]   # [B, 576, 1024]
+
+        # SigLIP: 取第 8 层 (index -1), 去掉第一个 CLS (index 1:)
+        c_siglip_last = center_siglip_reshaped[:, -1, 1:, :] # [B, 576, 1024]
+
+        # [A4] 融合 (现在两者都是 [B, 576, 1024]，物理空间完全对齐)
+        center_feat_fused = (c_dino_last + c_siglip_last) * 0.5
+
+
+        # ---------------------------------------------------------
+        # B. 处理四个角落子图 (Corner Crops, Index 1-4)
+        # ---------------------------------------------------------
+
+        # [B1] 提取 DINO 角落图
+        # 原始数据: [B, 4张图, 4*577, 1024]
+        corners_dino_raw = all_dino_feats[:, 1:5]
+        # Reshape: [B, 4张图, 4层, 577个, 1024]
+        corners_dino_reshaped = corners_dino_raw.view(B, 4, num_layers_dino, total_tokens_per_layer, D_common)
+
+        # [B2] 提取 SigLIP 角落图
+        # 原始数据: [B, 4张图, 8*577, 1024]
+        corners_siglip_raw = all_siglip_feats[:, 1:5]
+        # Reshape: [B, 4张图, 8层, 577个, 1024] (这里必须用 8)
+        corners_siglip_reshaped = corners_siglip_raw.view(B, 4, num_layers_siglip, total_tokens_per_layer, D_common)
+
+        # [B3] 精准切片
+        # DINO: 取最后一层, 去掉 CLS
+        corners_dino_last = corners_dino_reshaped[:, :, -1, 1:, :]   # [B, 4, 576, 1024]
+
+        # SigLIP: 取最后一层, 去掉 CLS
+        corners_siglip_last = corners_siglip_reshaped[:, :, -1, 1:, :] # [B, 4, 576, 1024]
+
+        # [B4] 融合
+        corner_feats_fused = (corners_dino_last + corners_siglip_last) * 0.5
+
+        # ---------------------------------------------------------
+        # C. 召唤采样器 (现在输入非常纯净且正确)
+        # ---------------------------------------------------------
+        center_base, selected_patches = self.saliency_sampler(
+            center_feat_fused, 
+            corner_feats_fused, 
+            num_topk=210
+        )
+
+        # =========================================================
+        # 🧩 阶段三：最终合体 (Final Assembly)
+        # =========================================================
+        # 顺序：[Global Soul (4)] + [Center Base (144)] + [Corner Gems (210)]
+        # 总计：358 Tokens
         
-        def get_kv_ctx(p):
-            p_flat = p.flatten(0, 1).contiguous()
-            m = bipartite_soft_matching_merge(p_flat, target_context, p_flat)
-            return m.view(Total_B, -1, self.global_dimension)
+        final_embedding = torch.cat([
+            final_global_cls_tokens,   # [B, 4, 1024]
+            center_base,        # [B, 144, 1024]
+            selected_patches    # [B, 210, 1024]
+        ], dim=1)
 
-        B_kv_context = get_kv_ctx(B_patches)
-        A_kv_context = get_kv_ctx(A_patches)
+        if torch.distributed.get_rank() == 0: # 只让主进程打印，避免刷屏
+            print(f"\n🔍 [Final Check] Global CLS Shape: {final_global_cls_tokens.shape}")
+            print(f"🔍 [Final Check] Center Base Shape: {center_base.shape}")
+            print(f"🔍 [Final Check] Selected Patches Shape: {selected_patches.shape}")
+            print(f"🚀 [Final Check] Final Embedding Shape: {final_embedding.shape}")
+            
+            # 检查是否存在非法值
+            has_nan = torch.isnan(final_embedding).any()
+            has_inf = torch.isinf(final_embedding).any()
+            max_val = final_embedding.max().item()
+            min_val = final_embedding.min().item()
+            mean_val = final_embedding.abs().mean().item()
 
-        def cross_attn_group(cls_t, kv_t, blocks, weights):
-            enhanced = []
-            for i in range(len(blocks)):
-                if i < cls_t.shape[1]:
-                    # CLS 特征与对侧 KV 特征交互
-                    enhanced.append(blocks[i](torch.cat([cls_t[:, i], kv_t], dim=1))[:, 0:1, :])
-            if not enhanced: return cls_t[:, 0]
-            w = F.softmax(weights[:len(enhanced)], dim=0).view(1, -1, 1).to(self.dtype)
-            return torch.sum(torch.cat(enhanced, dim=1) * w, dim=1, keepdim=True)
+            print(f"💎 [Value Stat] NaN: {has_nan} | Inf: {has_inf}")
+            print(f"💎 [Value Stat] Max: {max_val:.4f} | Min: {min_val:.4f} | Mean_Abs: {mean_val:.4f}")
+            
+            if max_val > 100 or has_nan or has_inf:
+                print("⚠️ [Warning] 数值极度不稳定，梯度极易爆炸！")
 
-        # 执行双塔交互逻辑
-        final_cls_A = cross_attn_group(A_cls, B_kv_context, self.multi_cls_cross_attn_blocks_A, self.dino_cls_attn_weights)
-        
-        # 伪 CLS 头的权重预测
-        pseudo_B = self.b_pseudo_cls_head(B_kv_context.unsqueeze(1).repeat(1, N_B, 1, 1).flatten(0, 1)).view(Total_B, N_B, 1, -1)
-        final_cls_B = cross_attn_group(pseudo_B, A_kv_context, self.multi_cls_cross_attn_blocks_B, self.oryx_cls_attn_weights)
 
-        # 融合两者的最终 CLS Token
-        w_final = F.softmax(self.final_cls_weights, dim=0).view(1, 2, 1).to(self.dtype)
-        enhanced_cls_token = torch.sum(torch.cat([final_cls_A, final_cls_B], dim=1) * w_final, dim=1, keepdim=True)
-
-        # =================================================================
-        # 4. 子图内部合并 (Intra-View Merge) -> 输出 365 Tokens
-        # =================================================================
-        A_up, A_lo = A_patches[:, :N_A//2].flatten(1, 2), A_patches[:, N_A//2:].flatten(1, 2)
-        B_up, B_lo = B_patches[:, :N_B//2].flatten(1, 2), B_patches[:, N_B//2:].flatten(1, 2)
-
-        def merge_to(x, n):
-            if x.shape[1] <= n: return x 
-            m_f, _ = random_bipartite_soft_matching(x, r=x.shape[1]-n)
-            return m_f(x)
-
-        target_n = T_actual // self.compression_K 
-        
-        # 拼接产生单图的 365 个 Token
-        out = torch.cat([enhanced_cls_token, merge_to(A_up, target_n), merge_to(B_up, target_n), merge_to(A_lo, target_n), merge_to(B_lo, target_n)], dim=1)
-        
-        # 如果不是多视图（比如单图测试），直接返回
-        if not is_multi_view:
-            return out, None
-
-        # =================================================================
-        # 5. 6视图最终聚合 (6 -> 1)
-        # =================================================================
-        # 恢复 Batch 结构 [Batch, 6, 365, 1024]
-        Real_Batch_Size = Total_B // Num_Views
-        all_tokens = out.view(Real_Batch_Size, Num_Views, out.shape[1], -1).flatten(1, 2)
-        
-        # 核心：使用 Token Merging 算法将 2190 个 Token 压缩回 365 个
-        # 这里的 365 必须与 LLM 端定义的长度严格一致
-        final_out = bipartite_soft_matching_merge(all_tokens, 365, all_tokens)
-        
-        return final_out, None
+        return final_embedding, None

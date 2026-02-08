@@ -11,6 +11,46 @@ def rank0_print(*args):
     if local_rank == 0:
         print(*args)
 
+#很明显要根据之前LLM基座的分隔符来设计
+class VisualTokenStructurer:
+    def __init__(self, config, embed_tokens_fn):
+        self.config = config
+        self.embed_tokens = embed_tokens_fn
+        # 1. 根据你的探测，Phi-1.5 的换行符是 198
+        self.newline_id = 198 
+        # 2. 如果你想做更强的转场（比如全局到局部），可以用 ### (21017)
+        self.sep_id = 21017 
+        
+    def __call__(self, visual_features):
+        """
+        输入: [358, 1024]
+        输出: [365, 1024]
+        """
+        device = visual_features.device
+        
+        # 准备向量 (必须从 LLM 的 Embedding 层拿，才能保持语义空间一致)
+        nl_emb = self.embed_tokens(torch.tensor([self.newline_id], device=device)) # [1, 1024]
+        
+        # 按照你的混合塔设计切分
+        soul = visual_features[0:4, :]          # 4
+        base = visual_features[4:148, :]        # 144
+        detail = visual_features[148:358, :]    # 210
+        
+        # 组合成 365
+        # 策略：Soul(4) + \n(1) + Base(144) + \n(1) + Detail(210) + \n*5(5)
+        # 这里的 5 个换行是作为“图像结束”的标志，防止文本瞬间贴上来
+        res = torch.cat([
+            soul, 
+            nl_emb, 
+            base, 
+            nl_emb, 
+            detail, 
+            nl_emb.repeat(5, 1)
+        ], dim=0)
+        
+        return res
+
+
 #直接强制选择这个indeity投影，直接在这个里面，在增加一个开源的openvision2的编码器，并初始化装载
 class BunnyMetaModel:
     def __init__(self, config):
@@ -113,8 +153,10 @@ class BunnyMetaForCausalLM(ABC):
     @abstractmethod
     def get_model(self):
         pass
+
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
+    
     def encode_images(self, images):
         #这里可以来控制,如果不是dynamic 
         vision_tower = self.get_model().get_vision_tower()
@@ -142,10 +184,19 @@ class BunnyMetaForCausalLM(ABC):
                 return image_features    
             
 
-    # 也就说这个地方可以加入一个专家混合（MOE）层，这个层负责更加合理地融合来自多个视觉编码器的不同视觉特征
+
+# 其实代码里是有批次的。但因为 LLM 处理的是变长序列（不同句子的 Token 长度不一样），所以它采用了**“先打散、再组装、最后填充（Padding）”**的策略：
+# 打散（Flatten）：代码通过 attention_mask 把 Batch 里的每个样本取出来，变成一个一个独立的“变长列表”。
+# 图像替换：在一个循环里（for batch_idx, cur_input_ids in enumerate(input_ids):），逐个样本寻找图像占位符（IMAGE_TOKEN_INDEX），并把对应的视觉向量插进去。
+# 重新合体：在代码最后（new_input_embeds_padded 部分），它会找到这一批样本中最长的那一个，然后把其他短样本用 0 补齐，
+# 重新叠成一个 [Batch_Size, Max_Len, Hidden_Size] 的标准三维张量送给 LLM。
+
     def prepare_inputs_labels_for_multimodal(
             self, input_ids, position_ids, attention_mask, past_key_values, labels, images
     ):
+        ###########################################
+        #这段代码处理的是 LLM 模型在**推理（Inference）阶段的“流式生成”（Streaming Generation）**情况。
+        ############################################################################
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[
@@ -158,24 +209,38 @@ class BunnyMetaForCausalLM(ABC):
                 )), dim=1)
                 position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
+        
         #images 是一个包含多张图像的 List (每个元素是 $B \times C \times H \times W$)
         #5D 张量 (视频格式 $B \times T \times C \times H \times W$)，则判断为多帧输入 
-        if type(images) is list or images.ndim == 5:
+        #第一种情况：多图或视频输入，把所有图片堆叠在一起。
+        # 1. 统一编码，拿到 [Total_Images, 358, 1024]
+        if isinstance(images, list) or images.ndim == 5:
             concat_images = torch.cat([image for image in images], dim=0)
-            image_features = self.encode_images(concat_images) 
-            split_sizes = [image.shape[0] for image in images]
-            image_features = torch.split(image_features, split_sizes, dim=0)
-            #编码完成后，它将返回的特征拆分回原来每张图像的特征 List  
-            image_features = [x.flatten(0, 1).to(self.device) for x in image_features]
+            raw_features = self.encode_images(concat_images)
         else:
-            image_features  = self.encode_images(images).to(self.device)   #这个地方可能是不需要的
-        # Let's just add dummy tensors if they do not exist,
-        # it is a headache to deal with None all the time.
-        # But it is not ideal, and if you have a better idea,
-        # please open an issue / submit a PR, thanks.
+            raw_features = self.encode_images(images)
+        # 2. 【防坑核心】强制转换为包含 [358, 1024] 元素的列表
+        # 无论你是训练还是推理，无论是一张还是多张
+        if raw_features.ndim == 3: # [Batch, 358, 1024]
+            image_features = [raw_features[i] for i in range(raw_features.shape[0])]
+        else:
+            image_features = raw_features # 如果已经是 list 则保持
+        # 调试监控眼
+        if local_rank== 0: # 只在主进程打印
+            print(f"DEBUG: image_features type: {type(image_features)}")
+            if isinstance(image_features, list):
+                print(f"DEBUG: image_features[0] shape: {image_features[0].shape}")
+            else:
+                print(f"DEBUG: image_features shape: {image_features.shape}")
+
+        ###########################################
+        #因为函数最后要返回这些值。如果用户进来时没传 attention_mask，函数会自己生成一个，
+        # 最后返回时要根据这个备份判断是返回生成的掩码还是返回 None
+        ############################################################################       
         _labels = labels
         _position_ids = position_ids
         _attention_mask = attention_mask
+
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
         else:
@@ -184,133 +249,126 @@ class BunnyMetaForCausalLM(ABC):
             position_ids = torch.arange(0, input_ids.shape[1], dtype=torch.long, device=input_ids.device)
         if labels is None:
             labels = torch.full_like(input_ids, IGNORE_INDEX)
+
+        #改 Tensor 里的 -200 为 0：是为了让模型在把文本转向量（Embedding）时，别因为遇到负数而崩溃。
         input_ids_temp = input_ids # points to the actual input_ids tensor
-        # remove the padding using attention_mask -- TODO: double check
+
+
+        # # 形状 [2, 6] -> Batch_size=2, Max_Len=6
+        # [
+        # [-200, 10, 15, 12, 0, 0],  # 样本1: <image> What is this? (实际长度4, 补了2个0)
+        # [10, 25, 0, 0, 0, 0]       # 样本2: Hello? (实际长度2, 补了4个0)
+        # ]
+        # attention_mask (Tensor):
+
+        # Python
+        # [
+        # [1, 1, 1, 1, 0, 0], # 1代表真话，0代表Padding
+        # [1, 1, 0, 0, 0, 0]
+        # ]
+
+        # 去掉 Padding（拆掉多余的线）
         input_ids = [cur_input_ids[cur_attention_mask] for cur_input_ids, cur_attention_mask in
                      zip(input_ids, attention_mask)]
+        
         labels = [cur_labels[cur_attention_mask] for cur_labels, cur_attention_mask in zip(labels, attention_mask)]
-        # -- TODO: better implementation?
-        # replace IMAGE_TOKEN_INDEX(-200) with 0 to be compatible with repetition penalty
+  
         input_ids_temp[input_ids_temp == IMAGE_TOKEN_INDEX] = 0
+
+        # 执行后，原始 input_ids 变成：
+
+        # Python
+        # [
+        #   [0, 10, 15, 12, 0, 0],  # 原来的 -200 变成了 0
+        #   [10, 25, 0, 0, 0, 0]
+        # ]
+
+        token_sewer = VisualTokenStructurer(self.config, self.get_input_embeddings())
         new_input_embeds = []
         new_labels = []
         cur_image_idx = 0
+        # --- 2. 安全检查：统计占位符总数 (修正后的逻辑) ---
+        total_image_placeholders = sum((x == IMAGE_TOKEN_INDEX).sum().item() for x in input_ids)
+        if len(image_features) != total_image_placeholders:
+            raise ValueError(f"特征数量({len(image_features)})与占位符数量({total_image_placeholders})不匹配！")
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
-            if num_images == 0:
-                cur_image_features = image_features[cur_image_idx]
-                cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
-                cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
-                new_input_embeds.append(cur_input_embeds)
-                new_labels.append(labels[batch_idx])
-                cur_image_idx += 1
-                continue
-            image_token_indices = [-1] + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist() + [
-                cur_input_ids.shape[0]]
-            cur_input_ids_noim = []
             cur_labels = labels[batch_idx]
-            cur_labels_noim = []
-            for i in range(len(image_token_indices) - 1):
-                cur_input_ids_noim.append(cur_input_ids[image_token_indices[i] + 1:image_token_indices[i + 1]])
-                cur_labels_noim.append(cur_labels[image_token_indices[i] + 1:image_token_indices[i + 1]])
-            split_sizes = [x.shape[0] for x in cur_labels_noim]
-            cur_input_embeds = self.get_model().embed_tokens(torch.cat(cur_input_ids_noim))
-            cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
+            
+            if num_images == 0:
+                # 纯文本处理
+                cur_input_embeds = self.get_input_embeddings()(cur_input_ids)
+                new_input_embeds.append(cur_input_embeds)
+                new_labels.append(cur_labels)
+                continue
+
+            # 寻找切口 [-1, img_pos, end_pos]
+            image_token_indices = [-1] + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist() + [cur_input_ids.shape[0]]
             cur_new_input_embeds = []
             cur_new_labels = []
+
             for i in range(num_images + 1):
-                cur_new_input_embeds.append(cur_input_embeds_no_im[i])
-                cur_new_labels.append(cur_labels_noim[i])
+                # A. 切出文本片段并转向量
+                text_seg = cur_input_ids[image_token_indices[i] + 1 : image_token_indices[i+1]]
+                label_seg = cur_labels[image_token_indices[i] + 1 : image_token_indices[i+1]]
+                
+                if text_seg.shape[0] > 0:
+                    cur_new_input_embeds.append(self.get_input_embeddings()(text_seg))
+                    cur_new_labels.append(label_seg)
+                
+                # B. 插入结构化后的 365 图像特征
                 if i < num_images:
-                    cur_image_features = image_features[cur_image_idx]
+                    raw_features = image_features[cur_image_idx] # [358, 2048]
                     cur_image_idx += 1
-                    cur_new_input_embeds.append(cur_image_features)
+                    
+                    # --- 讲究的 358 -> 365 转换 ---
+                    # 4(Soul) + 1(n) + 144(Base) + 1(n) + 210(Detail) + 5(n) = 365
+                    structured_features = token_sewer(raw_features) 
+                    
+                    cur_new_input_embeds.append(structured_features)
                     cur_new_labels.append(
-                        torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device,
-                                   dtype=cur_labels.dtype))
-            cur_new_input_embeds = torch.cat(cur_new_input_embeds)
-            cur_new_labels = torch.cat(cur_new_labels)
-            new_input_embeds.append(cur_new_input_embeds)
-            new_labels.append(cur_new_labels)
-        #这个地方有一个隐含的错误，如果Token indices sequence length is longer than the specified maximum sequence length 
-        # for this model (3052 > 2048). Running this sequence through the model will result in indexing errors（我们在最后面再来修改*************）
-        # Truncate sequences to max length as image embeddings can make the sequence longer
-        tokenizer_model_max_length = getattr(self.config, 'tokenizer_model_max_length', None)
-        if tokenizer_model_max_length is not None:
-            new_input_embeds = [x[:tokenizer_model_max_length] for x in new_input_embeds]
-            new_labels = [x[:tokenizer_model_max_length] for x in new_labels]
-        # Combine them
+                        torch.full((365,), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype)
+                    )
+
+            # 拼接单个样本
+            new_input_embeds.append(torch.cat(cur_new_input_embeds))
+            new_labels.append(torch.cat(cur_new_labels))
+
+        # 3. 🛡️ 截断防御：解决 3052 > 2048 报错的核心逻辑
+        # 必须在 Padding 之前截断，否则 Max Length 检查会报错
+        tokenizer_model_max_length = getattr(self.config, 'tokenizer_model_max_length', 2048)
+        new_input_embeds = [x[:tokenizer_model_max_length] for x in new_input_embeds]
+        new_labels = [x[:tokenizer_model_max_length] for x in new_labels]
+
+        # 4. 重新 Padding 成标准 Batch Tensor
         max_len = max(x.shape[0] for x in new_input_embeds)
         batch_size = len(new_input_embeds)
+        target_dtype = new_labels[0].dtype
+        target_device = new_labels[0].device
+        new_labels_padded = torch.full((batch_size, max_len), IGNORE_INDEX, dtype=target_dtype, device=target_device)
+        attention_mask = torch.zeros((batch_size, max_len), dtype=torch.bool, device=target_device)
+        position_ids = torch.zeros((batch_size, max_len), dtype=torch.long, device=target_device)
         new_input_embeds_padded = []
-        new_labels_padded = torch.full((batch_size, max_len), IGNORE_INDEX, dtype=new_labels[0].dtype,
-                                       device=new_labels[0].device)
-        attention_mask = torch.zeros((batch_size, max_len), dtype=attention_mask.dtype, device=attention_mask.device)
-        position_ids = torch.zeros((batch_size, max_len), dtype=position_ids.dtype, device=position_ids.device)
-        for i, (cur_new_embed, cur_new_labels) in enumerate(zip(new_input_embeds, new_labels)):
-            cur_len = cur_new_embed.shape[0]
-            if getattr(self.config, 'tokenizer_padding_side', 'right') == "left":
-                new_input_embeds_padded.append(torch.cat((
-                    torch.zeros((max_len - cur_len, cur_new_embed.shape[1]), dtype=cur_new_embed.dtype,
-                                device=cur_new_embed.device),
-                    cur_new_embed
-                ), dim=0))
-                if cur_len > 0:
-                    new_labels_padded[i, -cur_len:] = cur_new_labels
-                    attention_mask[i, -cur_len:] = True
-                    position_ids[i, -cur_len:] = torch.arange(0, cur_len, dtype=position_ids.dtype,
-                                                              device=position_ids.device)
-            else:
-                new_input_embeds_padded.append(torch.cat((
-                    cur_new_embed,
-                    torch.zeros((max_len - cur_len, cur_new_embed.shape[1]), dtype=cur_new_embed.dtype,
-                                device=cur_new_embed.device)
-                ), dim=0))
-                if cur_len > 0:
-                    new_labels_padded[i, :cur_len] = cur_new_labels
-                    attention_mask[i, :cur_len] = True
-                    position_ids[i, :cur_len] = torch.arange(0, cur_len, dtype=position_ids.dtype,
-                                                             device=position_ids.device)
-        new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
-        if _labels is None:
-            new_labels = None
-        else:
-            new_labels = new_labels_padded
-        if _attention_mask is None:
-            attention_mask = None
-        else:
-            attention_mask = attention_mask.to(dtype=_attention_mask.dtype)
-        if _position_ids is None:
-            position_ids = None
-        
-        if new_input_embeds is not None and new_labels is not None:
-            # 1. 基础长度检查 (你已经有的)
-            assert new_input_embeds.shape[1] == new_labels.shape[1], "致命错误：Embeds 和 Labels 长度不一致！"
 
-            # 2. 检查有效监督信号 (防止全是 -100)
-            # 我们检查整个 batch 是否存在至少一个有效 token
-            valid_tokens_mask = (new_labels != -100)
-            total_valid_tokens = valid_tokens_mask.sum().item()
+        for i, (cur_embed, cur_label) in enumerate(zip(new_input_embeds, new_labels)):
+            cur_len = cur_embed.shape[0]
+            # 统一右填充 (适合训练)
+            new_input_embeds_padded.append(torch.cat((
+                cur_embed,
+                torch.zeros((max_len - cur_len, cur_embed.shape[1]), dtype=cur_embed.dtype, device=cur_embed.device)
+            ), dim=0))
             
-            if total_valid_tokens == 0:
-                # 如果这一个 batch 全是 -100，Loss 会变成 0 或者 NaN
-                # 打印警告信息，并强制给第一位一个 dummy label 维持梯度计算不崩溃
-                print(f"⚠️ [Warning] 发现全空 Label Batch! 正在实施防御...")
-                new_labels[0, 0] = 0 # 强制给一个信号
+            if cur_len > 0:
+                new_labels_padded[i, :cur_len] = cur_label
+                attention_mask[i, :cur_len] = True
+                position_ids[i, :cur_len] = torch.arange(0, cur_len, dtype=torch.long, device=target_device)
 
-            # 3. 数值稳定性检查 (防 NaN/Inf 的核心)
-            # 检查视觉特征和文本嵌入是否已经炸了
-            if torch.isnan(new_input_embeds).any() or torch.isinf(new_input_embeds).any():                
-                # 使用 nan_to_num 替代 torch.where，效率更高
-                # nan=0.0: 将 NaN 归零
-                # posinf=65500: 将正无穷限制在 FP16 的安全上限 (T4 溢出的重灾区)
-                # neginf=-65500: 将负无穷限制在 FP16 的安全下限
-                new_input_embeds = torch.nan_to_num(
-                    new_input_embeds, 
-                    nan=0.0, 
-                    posinf=65500, 
-                    neginf=-65500
-                )
+        new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
 
+        # 5. 🔥 终极稳定性加固 (防止 NaN/Inf 毁掉模型)
+        if torch.isnan(new_input_embeds).any() or torch.isinf(new_input_embeds).any():
+            new_input_embeds = torch.nan_to_num(new_input_embeds, nan=0.0, posinf=65500, neginf=-65500)
+        
 
-        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
+        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels_padded
+

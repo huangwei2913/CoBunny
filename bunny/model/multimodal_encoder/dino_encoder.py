@@ -9,7 +9,7 @@ from bunny.util.merge import bipartite_soft_matching_merge
 from dinov3.models.vision_transformer import DinoVisionTransformer
 from dinov3.hub.backbones import dinov3_vits16, dinov3_vitb16, dinov3_vitl16, dinov3_vit7b16
 from safetensors.torch import load_file  
-
+import math
 
 DINOv3_MODEL_FACTORIES = {
     "dinounet_s": dinov3_vits16,
@@ -161,12 +161,17 @@ class DinoVisionTower(BaseVisionTower):
             # 空间插值对齐到 target_N (如 24x24=576)
             if feat.shape[1] != self.target_N:
                 # [B, T, C] -> [B, C, T] -> [B, C, target_N] -> [B, target_N, C]
+                B, T, C = feat.shape
+                hw = int(math.sqrt(T)) # 算出原始的宽高，比如 24
+                target_hw = int(math.sqrt(self.target_N)) # 目标宽高，比如 24
+                feat = feat.view(B, hw, hw, C).permute(0, 3, 1, 2)
                 feat = F.interpolate(
-                    feat.permute(0, 2, 1),
-                    size=self.target_N,
-                    mode="linear",
+                    feat, 
+                    size=(target_hw, target_hw), 
+                    mode="bilinear", 
                     align_corners=False
-                ).permute(0, 2, 1).contiguous()
+                )
+                feat = feat.permute(0, 2, 3, 1).view(B, -1, C).contiguous()
 
             # 拼接 CLS Token: [B, 1, C] + [B, target_N, C] -> [B, 1+target_N, C]
             if cls is not None:
