@@ -90,7 +90,7 @@ bunny/serve/model_worker.py
 bunny/serve/register_worker.py
 bunny/train/arguments.py
 bunny/train/bunny_trainer.py
-bunny/train/train.py
+bunny/train/train_stage1.py
 bunny/train/train_stage3.py
 bunny/util/data_utils.py
 bunny/util/merge.py

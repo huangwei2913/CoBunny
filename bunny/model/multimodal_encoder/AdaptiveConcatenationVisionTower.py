@@ -487,24 +487,7 @@ class AdaptiveConcatenationVisionTower(nn.Module):
             selected_patches    # [B, 210, 1024]
         ], dim=1)
 
-        if torch.distributed.get_rank() == 0: # 只让主进程打印，避免刷屏
-            print(f"\n🔍 [Final Check] Global CLS Shape: {final_global_cls_tokens.shape}")
-            print(f"🔍 [Final Check] Center Base Shape: {center_base.shape}")
-            print(f"🔍 [Final Check] Selected Patches Shape: {selected_patches.shape}")
-            print(f"🚀 [Final Check] Final Embedding Shape: {final_embedding.shape}")
-            
-            # 检查是否存在非法值
-            has_nan = torch.isnan(final_embedding).any()
-            has_inf = torch.isinf(final_embedding).any()
-            max_val = final_embedding.max().item()
-            min_val = final_embedding.min().item()
-            mean_val = final_embedding.abs().mean().item()
-
-            print(f"💎 [Value Stat] NaN: {has_nan} | Inf: {has_inf}")
-            print(f"💎 [Value Stat] Max: {max_val:.4f} | Min: {min_val:.4f} | Mean_Abs: {mean_val:.4f}")
-            
-            if max_val > 100 or has_nan or has_inf:
-                print("⚠️ [Warning] 数值极度不稳定，梯度极易爆炸！")
+  
 
 
         return final_embedding, None

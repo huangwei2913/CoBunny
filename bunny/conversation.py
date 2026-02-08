@@ -40,24 +40,30 @@ class Conversation:
         在此处解决 ID 污染和多图逻辑。
         """
         messages = self.messages
-        
+        processed_messages = []  # 只针对第一个阶段训练有效 
+        for role, msg in messages: # 只针对第一个阶段训练有效 
+            if msg is not None:
+                if isinstance(msg, tuple):
+                    msg, _, _ = msg
+                # 调用你定义的 process_image_tokens
+                msg = self.process_image_tokens_stage1(msg)
+                processed_messages.append([role, msg])
+            else:
+                processed_messages.append([role, None])  # 只针对第一个阶段训练有效 
+
         # 1. 处理 PLAIN 模式 (通常用于简单指令)
         if self.sep_style == SeparatorStyle.PLAIN:
-            seps = [self.sep, self.sep2]
-            ret = self.system
-            for i, (role, message) in enumerate(messages):
-                if message:
-                    if isinstance(message, tuple):
-                        message = message[0]
-                    
-                    # 【核心修复 1】: 将原始 JSON 中的 <image> 替换为新 Token
-                    # 无论是单图还是多图，这里统一处理字符串
-                    msg_content = self.process_image_tokens(message)
-                    
-                    ret += msg_content + (seps[i % 2] if seps[i % 2] else "")
+            ret = ""
+            if self.system:
+                ret += self.system + self.sep
+            
+            for i, (role, msg) in enumerate(processed_messages):
+                if msg:
+                    # 直接拼内容，完全不加 "USER:" 或 "ASSISTANT:"
+                    ret += msg + self.sep
                 else:
                     ret += ""
-            return ret
+            return ret    
 
         # 2. 处理 TWO 模式 (Phi-1.5 训练主要走这里)
         elif self.sep_style == SeparatorStyle.TWO:
@@ -78,6 +84,26 @@ class Conversation:
         else:
             raise ValueError(f"Invalid style: {self.sep_style}")
 
+    #第一个阶段的目标只是训练projector，所有合格阶段
+    def process_image_tokens_stage1(self, text: str) -> str:
+        RAW_IMG_TAG = "<image>" 
+        if RAW_IMG_TAG in text:
+            num_images = text.count(RAW_IMG_TAG)
+            if num_images == 1:
+                # [微调]：确保 <img_content> 独占一行或有明显分隔，有利于 Stage 1 学习
+                return text.replace(RAW_IMG_TAG, DEFAULT_IMAGE_TOKEN + "\n")
+            
+            elif num_images > 1:
+                parts = text.split(RAW_IMG_TAG)
+                new_text = ""
+                for i in range(num_images):
+                    # 你的多图锚点逻辑很棒，保留
+                    new_text += f"{parts[i]}Image {i+1}: {DEFAULT_IMAGE_TOKEN} "
+                new_text += parts[-1]
+                return new_text.strip()
+        return text
+
+    #后面的第二和第三个阶段使用bunny做对话模版才用这个          
     def process_image_tokens(self, text: str) -> str:
         """
         [关键逻辑]
@@ -175,9 +201,21 @@ conv_bunny = Conversation(
     sep=" ",
     sep2="<|endoftext|>",
 )
+#增加第一个阶段的对话模版
+conv_plain = Conversation(
+    system="",
+    roles=("", ""), # 角色为空
+    messages=[],
+    offset=0,
+    sep_style=SeparatorStyle.PLAIN,
+    sep="\n",       # Stage 1 通常每一段后面只跟一个换行
+    sep2=None,
+    version="plain"
+)
 
 default_conversation = conv_bunny
 conv_templates = {
     "default": conv_bunny,
     "bunny": conv_bunny,
+    "plain": conv_plain,
 }

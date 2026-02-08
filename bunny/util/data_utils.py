@@ -141,8 +141,8 @@ def preprocess(
     debug_input = input_ids[debug_idx]
     debug_label = targets[debug_idx]
 
-    print("\n" + "="*50)
-    print("🚀 [PREPROCESS DEBUG] 检查 Label 遮蔽是否精准:")
+    #print("\n" + "="*50)
+    #print("🚀 [PREPROCESS DEBUG] 检查 Label 遮蔽是否精准:")
     
     decoded_output = []
     for token_id, label_id in zip(debug_input, debug_label):
@@ -157,8 +157,8 @@ def preprocess(
         else:
             decoded_output.append(f"\033[92m{token_text}\033[0m")
 
-    print("".join(decoded_output))
-    print("="*50 + "\n")
+    #print("".join(decoded_output))
+    #print("="*50 + "\n")
 
     input_ids = input_ids.view(-1)
     targets = targets.view(-1)
@@ -471,17 +471,17 @@ class DataCollatorForSupervisedDataset(object):
                  rank0_print(f"⚠️ [图像维度警告] 期望 6 维，实际得到: {batch['images'].shape}")
 
 
-        # --- 🚀 终极监控点 ---
-        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-            print("\n" + "🚚" * 10)
-            print("【DataCollator 发货质检..............................................】")
-            if 'images' in batch:
-                print(f"   - 图像批次维度 (Images Shape): {batch['images'].shape}")
-                # 预期应该是 [Batch, 6, 2, 3, 378, 378]
-            if 'input_ids' in batch:
-                print(f"   - 文本批次维度 (Input_ids Shape): {batch['input_ids'].shape}")
-                # 这里的 SeqLen 应该是这个 Batch 里最长样本的长度
-            print("🚚" * 10 + "\n")
+        # # --- 🚀 终极监控点 ---
+        # if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        #     #print("\n" + "🚚" * 10)
+        #     #print("【DataCollator 发货质检..............................................】")
+        #     if 'images' in batch:
+        #         print(f"   - 图像批次维度 (Images Shape): {batch['images'].shape}")
+        #         # 预期应该是 [Batch, 6, 2, 3, 378, 378]
+        #     if 'input_ids' in batch:
+        #         print(f"   - 文本批次维度 (Input_ids Shape): {batch['input_ids'].shape}")
+        #         # 这里的 SeqLen 应该是这个 Batch 里最长样本的长度
+        #     print("🚚" * 10 + "\n")
 
 
         return batch

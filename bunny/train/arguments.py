@@ -7,8 +7,8 @@ class ModelArguments:
     model_type: Optional[str] = field(default=None)  #选择何种LLM
     version: Optional[str] = field(default=None)  #选择何种对话模版
     freeze_backbone: bool = field(default=False)
-    tune_mm_mlp_adapter: bool = field(default=False)
-    unfreeze_mm_vision_tower: bool = field(default=False)  
+    unfreeze_mm_vision_tower: bool = field(default=False)
+    tune_mm_mlp_adapter: bool = field(default=False)  #以前是在模型参数部分的，现在要搞出来  
     vision_tower: Optional[str] = field(default=None)
     use_s2: bool = field(default=False)  #是否使用S2
     mm_vision_select_layer: Optional[int] = field(default=-1)   # default to the last layer
