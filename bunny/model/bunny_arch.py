@@ -293,11 +293,11 @@ class BunnyMetaForCausalLM(ABC):
             
 
 
-    # 其实代码里是有批次的。但因为 LLM 处理的是变长序列（不同句子的 Token 长度不一样），所以它采用了**“先打散、再组装、最后填充（Padding）”**的策略：
-    # 打散（Flatten）：代码通过 attention_mask 把 Batch 里的每个样本取出来，变成一个一个独立的“变长列表”。
-    # 图像替换：在一个循环里（for batch_idx, cur_input_ids in enumerate(input_ids):），逐个样本寻找图像占位符（IMAGE_TOKEN_INDEX），并把对应的视觉向量插进去。
-    # 重新合体：在代码最后（new_input_embeds_padded 部分），它会找到这一批样本中最长的那一个，然后把其他短样本用 0 补齐，
-    # 重新叠成一个 [Batch_Size, Max_Len, Hidden_Size] 的标准三维张量送给 LLM。
+# 其实代码里是有批次的。但因为 LLM 处理的是变长序列（不同句子的 Token 长度不一样），所以它采用了**“先打散、再组装、最后填充（Padding）”**的策略：
+# 打散（Flatten）：代码通过 attention_mask 把 Batch 里的每个样本取出来，变成一个一个独立的“变长列表”。
+# 图像替换：在一个循环里（for batch_idx, cur_input_ids in enumerate(input_ids):），逐个样本寻找图像占位符（IMAGE_TOKEN_INDEX），并把对应的视觉向量插进去。
+# 重新合体：在代码最后（new_input_embeds_padded 部分），它会找到这一批样本中最长的那一个，然后把其他短样本用 0 补齐，
+# 重新叠成一个 [Batch_Size, Max_Len, Hidden_Size] 的标准三维张量送给 LLM。
 
     def prepare_inputs_labels_for_multimodal(
             self, input_ids, position_ids, attention_mask, past_key_values, labels, images
@@ -457,4 +457,5 @@ class BunnyMetaForCausalLM(ABC):
 
             # 根据 Transformers 规范，返回 embeds 时，input_ids 必须为 None
             return None, final_position_ids, final_attention_mask, past_key_values, final_input_embeds, final_labels
+
 

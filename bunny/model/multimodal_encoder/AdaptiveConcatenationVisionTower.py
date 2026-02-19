@@ -490,6 +490,25 @@ class AdaptiveConcatenationVisionTower(nn.Module):
         ], dim=1)
 
   
-
+        # =========================================================
+        # 🕵️ RANK 0 深度 Token 审计 (放入 forward 结尾)
+        # =========================================================
+        if rank == 0:
+            print(f"\n" + "📊" * 10 + " [TOKEN 组成审计] " + "📊" * 10)
+            print(f"1. 【灵魂层】Global Soul Tokens (Fusion): {final_global_cls_tokens.shape}")
+            print(f"2. 【骨架层】Center Base (12x12):        {center_base.shape}")
+            print(f"3. 【血肉层】Selected Corner Patches:   {selected_patches.shape}")
+            print(f"--------------------------------------------------")
+            print(f"🚀 [最终合体] Final Embedding Shape:    {final_embedding.shape}")
+            
+            # 关键：检查是否达到了你预期的 365
+            expected_total = 365
+            actual_total = final_embedding.shape[1]
+            if actual_total != expected_total:
+                print(f"❌ [警报] Token 数量不匹配！预期 {expected_total}, 实际 {actual_total}")
+                print(f"💡 [提示] 你之前提到的 4+1+144+1+210+5=365 逻辑在代码中尚未体现。")
+            else:
+                print(f"✅ [对齐] 365 目标达成！")
+            print("📊" * 28 + "\n")
 
         return final_embedding, None
