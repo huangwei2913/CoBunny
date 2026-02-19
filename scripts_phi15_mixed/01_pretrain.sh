@@ -18,18 +18,34 @@ INCLUDE_STR="192.168.0.3:0,1,2,3,4,5,6,7"
 # 2. 模型与架构参数
 # ========================================================
 MODEL_TYPE="phi-1.5"
-BASE_MODEL="/mnt/conda_data/microsoft/phi-1_5"
+BASE_MODEL="/mnt/conda_data/checkpoints-pretrain/checkpoint-18000"
 # 关键：这里传你代码中定义的逻辑开关名称
 VISION_TOWER="mixedencoder" 
-OUTPUT_DIR="./checkpoints-pretrain/pretrain"
+OUTPUT_DIR="/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_continued"
 mkdir -p $OUTPUT_DIR
+# 1. 基础环境
 export PYTHONUNBUFFERED=1
-export PYTORCH_ALLOC_CONF=expandable_segments:True
 export DS_SKIP_CUDA_CHECK=1
 export DEEPSPEED_USE_TORCH_ADAM=1
-export NCCL_DEBUG=INFO  # 开启调试模式，这样卡住时能看到为什么卡
+
+# 2. 显存管理（重点修正）
+# 注意：PYTORCH_CUDA_ALLOC_CONF 只能定义一次，不要写散了
+# max_split_size_mb:512 能减少显存碎片，防止莫名其妙的 OOM
+#export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128"
+# 3. NCCL 多机通讯优化（稳定性关键）
+export NCCL_DEBUG=INFO  # 既然报错了，保持 INFO 很有必要
 export NCCL_SOCKET_IFNAME=eth0 
 export GLOO_SOCKET_IFNAME=eth0
+
+# 核心稳定性补丁：如果你的网络不是昂贵的 InfiniBand (IB)，请务必禁用以下两项
+export NCCL_IB_DISABLE=1      # 禁用 IB 协议，强制走以太网，防止 NCCL 找错网卡
+export NCCL_P2P_DISABLE=1     # 在普通以太网或虚拟化网络中，P2P 通讯极易崩溃
+
+# 超时控制：2M 数据启动慢，增加超时阈值防止没跑就开始报错
+export NCCL_BLOCKING_WAIT=1
+export NCCL_TIMEOUT=12000     # 增加到 12000 秒
+export NCCL_ASYNC_ERROR_HANDLING=1
 # ========================================================
 # 3. 启动训练 (使用 DeepSpeed)
 # ========================================================
@@ -57,13 +73,13 @@ deepspeed \
     --fp16 True \
     --output_dir $OUTPUT_DIR \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 1 \
+    --per_device_train_batch_size 2 \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 4 \
     --eval_strategy "steps" \
-    --eval_steps 5000 \
+    --eval_steps 2000 \
     --save_strategy "steps" \
-    --save_steps 5000 \
+    --save_steps 2000 \
     --save_total_limit 10 \
     --load_best_model_at_end True \
     --learning_rate 2e-4 \
@@ -77,5 +93,5 @@ deepspeed \
     --model_max_length 2048 \
     --gradient_checkpointing True \
     --group_by_modality_length True \
-    --dataloader_num_workers 30 \
+    --dataloader_num_workers 16 \
     --report_to none 2>&1 | tee $OUTPUT_DIR/pretrain.log

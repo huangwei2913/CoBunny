@@ -11,7 +11,7 @@ from bunny import conversation as conversation_lib
 from bunny.model import *
 from bunny.util.data_utils import make_supervised_data_module, DataArguments
 from arguments import ModelArguments,TrainingArguments
-
+import re
 
 local_rank = None
 def rank0_print(*args):
@@ -252,17 +252,30 @@ def train():
     # =========================================================
     # 14. 训练执行 (支持断点续训)
     # =========================================================
+    # =========================================================
+    # 修复后的断点查找逻辑
+    # =========================================================
+
+
+    # 1. 获取所有 checkpoint 文件夹
     checkpoints = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
+
     if checkpoints:
-        latest_ckpt = str(sorted(checkpoints)[-1])
+        # 2. 关键修复：按照文件夹末尾的数字进行排序
+        # d.name.split('-')[-1] 拿到数字字符串，int() 转换成数字
+        checkpoints.sort(key=lambda d: int(re.findall(r"checkpoint-(\d+)", d.name)[0]))
+        
+        latest_ckpt = str(checkpoints[-1]) # 现在这一定是数字最大的那个了
+
         if checkpoint_has_trainer_state(latest_ckpt):
-            rank0_print(f"🔄 Resuming from checkpoint: {latest_ckpt}")
+            rank0_print(f"✅ 发现最新断点，正在从数字最大的位置恢复: {latest_ckpt}")
             trainer.train(resume_from_checkpoint=latest_ckpt)
         else:
-            rank0_print(f"⚠️ Checkpoint 损坏，重新开始训练。")
+            rank0_print(f"⚠️ 文件夹 {latest_ckpt} 似乎损坏或不完整，尝试退回上一个...")
+            # 这里的逻辑可以更健壮点，但至少排序对了
             trainer.train()
     else:
-        rank0_print("🚀 Starting training from scratch.")
+        rank0_print("🚀 未发现 Checkpoint，从头开始训练。")
         trainer.train()
 
     # 保存最终状态

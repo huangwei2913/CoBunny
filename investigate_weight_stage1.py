@@ -1,45 +1,68 @@
 import torch
+from safetensors.torch import load_file
 import os
+from collections import defaultdict
 
-def check_bunny_weights(projector_path, vision_tower_path=None):
-    print(f"\n{'='*20} 1. 投影层检查 (Projector) {'='*20}")
-    if os.path.exists(projector_path):
-        weights = torch.load(projector_path, map_location='cpu')
-        keys = list(weights.keys())
-        print(f"文件路径: {projector_path}")
-        print(f"参数总量: {len(keys)}")
-        print(f"前 10 个 Key 示例:")
-        for k in keys[:10]:
-            # 打印 key 的名字和维数，方便对齐
-            print(f"  - {k} \t shape: {list(weights[k].shape)}")
-        
-        # 自动分析前缀
-        if any('mm_projector' in k for k in keys):
-            print("⚠️ 发现含有 'mm_projector.' 前缀，加载时需 split 后缀。")
-        elif any('0.weight' == k or '0.bias' == k for k in keys):
-            print("✅ 发现 Key 是纯净的序号开头 (如 0.weight)，这是 Sequential 期望的格式。")
+# 指向你保存的全量权重文件
+checkpoint_path = "/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_continued/model.safetensors"
+
+if not os.path.exists(checkpoint_path):
+    print(f"❌ 找不到权重文件: {checkpoint_path}")
+    exit()
+
+print(f"📖 正在深度解析权重文件: {checkpoint_path}")
+print("=" * 80)
+
+# 加载权重
+weights = load_file(checkpoint_path)
+all_keys = sorted(weights.keys())
+
+# 用于分类存储
+categories = {
+    "Vision Tower (视觉编码器)": [],
+    "Projector (模态投影层)": [],
+    "LLM Backbone (语言模型骨架)": [],
+    "Other (其他权重)": []
+}
+
+for key in all_keys:
+    if "vision_tower" in key:
+        categories["Vision Tower (视觉编码器)"].append(key)
+    elif "mm_projector" in key:
+        categories["Projector (模态投影层)"].append(key)
+    elif "model.layers" in key or "lm_head" in key or "embed_tokens" in key or "final_layernorm" in key:
+        categories["LLM Backbone (语言模型骨架)"].append(key)
     else:
-        print(f"❌ 未找到投影层文件: {projector_path}")
+        categories["Other (其他权重)"].append(key)
 
-    if vision_tower_path and os.path.exists(vision_tower_path):
-        print(f"\n{'='*20} 2. 视觉塔检查 (Vision Tower) {'='*20}")
-        vt_weights = torch.load(vision_tower_path, map_location='cpu')
-        vt_keys = list(vt_weights.keys())
-        print(f"文件路径: {vision_tower_path}")
-        print(f"参数总量: {len(vt_keys)}")
-        print(f"融合层相关 Key 示例:")
-        # 看看有没有你定义的那些融合层关键字
-        fusion_keywords = ['mlp_layers', 'cross_attn', 'cls_weights']
-        found_fusion = [k for k in vt_keys if any(kw in k for kw in fusion_keywords)]
-        for k in found_fusion[:]:
-            print(f"  - {k}")
-        if not found_fusion:
-            print("⚠️ 未发现明显的融合层 Key，请检查保存逻辑。")
-    elif vision_tower_path:
-        print(f"\n❌ 未找到视觉塔权重文件: {vision_tower_path}")
+# --- 开始打印完整列表 ---
+for cat_name, keys in categories.items():
+    print(f"\n### {cat_name} - 共 {len(keys)} 个 Key")
+    print("-" * 40)
+    for k in keys:
+        shape = list(weights[k].shape)
+        dtype = weights[k].dtype
+        # 打印名称、形状和数据类型
+        print(f"  {k:<60} | {str(shape):<20} | {dtype}")
 
-# --- 请修改为你实际的路径 ---
-projector_file = "/mnt/CoBunny/checkpoints-pretrain/bunny-phi1.5-mixed-pretrain/checkpoint-33300/mm_projector.bin"
-vision_file = "/mnt/CoBunny/checkpoints-pretrain/bunny-phi1.5-mixed-pretrain/checkpoint-33300/vision_tower_tuned.bin"
+print("\n" + "=" * 80)
+print(f"📊 扫描总结:")
+print(f"  - 总 Key 数量: {len(all_keys)}")
+for cat_name, keys in categories.items():
+    print(f"  - {cat_name}: {len(keys)} 个")
 
-check_bunny_weights(projector_file, vision_file)
+# 验证几个核心组件的完整性
+print("\n✅ 核心组件状态检查:")
+critical_components = {
+    "Vision Tower": any("vision_tower" in k for k in all_keys),
+    "Projector": any("mm_projector" in k for k in all_keys),
+    "LLM Layers": any("model.layers.0" in k for k in all_keys),
+    "LM Head": "lm_head.weight" in all_keys
+}
+
+for component, status in critical_components.items():
+    status_str = "OK" if status else "MISSING"
+    print(f"  [{status_str}] {component}")
+
+print("=" * 80)
+print("💡 提示：你可以通过输出查看每一层具体名称，Stage 3 全解冻时这些 Key 都将被更新。")

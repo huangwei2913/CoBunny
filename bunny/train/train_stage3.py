@@ -33,7 +33,8 @@ def train():
 
     # 自动推断计算精度 (FP16/BF16/FP32)
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
-
+    model_args.unfreeze_mm_vision_tower = True  # 解冻视觉塔
+    training_args.freeze_mm_mlp_adapter = False # 解冻 Projector     
 
     import sys
     if training_args.local_rank == 0 or training_args.local_rank == -1:
@@ -130,7 +131,7 @@ def train():
     
     # 2. 【初始化】正常调用
     rank0_print("👁️ 初始化视觉模块...")
-    model.get_model().initialize_vision_modules(model_args=model_args)
+    model.get_model().initialize_vision_modules_stage3(model_args=model_args)
     if training_args.local_rank <= 0:  # 仅在主进程运行
         print("\n" + "🔍" * 20)
         print("开始扫描 AdaptiveConcatenationVisionTower 及其子塔属性...")
@@ -329,6 +330,11 @@ def train():
             model = model.merge_and_unload()
             model.config.lora_enable = False # 更新配置
 
+        # 强制将所有子模块的 Buffer 标记为 persistent=True
+        for name, module in model.named_modules():
+            for buf_name, buf in module.named_buffers(recurse=False):
+                # 将 buffer 重新注册为持久化，这样它就会被存入 pytorch_model.bin
+                module.register_buffer(buf_name, buf, persistent=True)
         # 强制全量保存 (Config + Weights + Tokenizer)
         model.save_pretrained(training_args.output_dir)
         tokenizer.save_pretrained(training_args.output_dir)

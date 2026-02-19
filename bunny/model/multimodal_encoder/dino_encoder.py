@@ -70,7 +70,7 @@ class DinoVisionTower(BaseVisionTower):
         self._image_size = 384    # DinoV3 默认常用尺寸
         self._patch_size = 16 
         self._num_patches_cached = None 
-        
+        self.is_loaded  = False
         self.model_name = "dinounet_b"
         self.interaction_indexes = [2, 5, 8, 11]
         
@@ -94,6 +94,9 @@ class DinoVisionTower(BaseVisionTower):
 
 
     def load_model(self, device_map=None):
+        if self.is_loaded:
+            print(f"✅ [DinoVisionTower] 状态已锁定，无需重复加载，保护当前显存权重。")
+            return
         # 1. 灵魂探测：利用 Python 反射机制检查 builder.py 是否已完成权重注入
         has_soul = False
         

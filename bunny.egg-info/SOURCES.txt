@@ -35,6 +35,7 @@ bunny/model/language_model/bunny_qwen.py
 bunny/model/language_model/bunny_stablelm.py
 bunny/model/language_model/changepybintosafe.py
 bunny/model/language_model/checklorabinweights.py
+bunny/model/language_model/inference_v2.py
 bunny/model/language_model/stage1pre.py
 bunny/model/language_model/stage2finedtunedwithlora.py
 bunny/model/language_model/stage2finetuned.py

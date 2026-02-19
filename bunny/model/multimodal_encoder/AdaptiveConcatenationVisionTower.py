@@ -313,7 +313,9 @@ class AdaptiveConcatenationVisionTower(nn.Module):
             self.has_printed_shape = True
 
 
-       
+        device = images.device
+        self.siglip_vision_tower.to(device)
+        self.dino_vision_tower.to(device)
         ###############################################################################################
         # 得到4个全局增强cls tokens
         # #############################################################################################        

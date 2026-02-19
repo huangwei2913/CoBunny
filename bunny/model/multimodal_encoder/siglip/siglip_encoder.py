@@ -10,7 +10,7 @@ class SiglipVisionTower(BaseVisionTower): # 1. 改为继承 BaseVisionTower
     def __init__(self, vision_tower, args, delay_load=False):
         # 2. 调用父类 init，它会自动处理 self.unfreeze_mm_vision_tower 的赋值
         super(SiglipVisionTower, self).__init__(vision_tower, args, delay_load)
-
+        self.is_loaded  = False
         self.vision_tower_name = vision_tower
         self.select_indices = [3,9,12,14,18,19,22,24]
         self.target_N = 576  
@@ -23,6 +23,9 @@ class SiglipVisionTower(BaseVisionTower): # 1. 改为继承 BaseVisionTower
             self.cfg_only = SiglipVisionConfig.from_pretrained(self.vision_tower_name)
 
     def load_model(self, device_map=None):
+        if self.is_loaded:
+            print(f"✅ [SigLIP] 状态已锁定，无需重复加载，保护当前显存权重。")
+            return
         """
         核心逻辑：实现“防御性加载”。
         1. 检查灵魂（权重）是否已由 builder.py 的 from_pretrained 注入。

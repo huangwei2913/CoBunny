@@ -1,40 +1,52 @@
 #!/bin/bash
 
 # ========================================================
-# 1. 基础配置
+# 1. 基础环境配置 (保持你之前的网络优化)
 # ========================================================
 MASTER_ADDR=${MASTER_ADDR:-"192.168.0.3"}
 MASTER_PORT=${MASTER_PORT:-"29501"}
-# 你的 hostfile 配置
 HOSTFILE="./script/deepspeed/hostfile"
-# 确保所有卡都参与
 INCLUDE_STR="192.168.0.3:0,1,2,3,4,5,6,7"
+
+# 显存碎片优化 (关键)
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128"
+
+# NCCL 稳定性配置 (防止多机死锁)
+export NCCL_DEBUG=INFO
+export NCCL_SOCKET_IFNAME=eth0 
+export GLOO_SOCKET_IFNAME=eth0
+export NCCL_IB_DISABLE=1
+export NCCL_P2P_DISABLE=1
+export NCCL_BLOCKING_WAIT=1
+export NCCL_TIMEOUT=12000
+export NCCL_ASYNC_ERROR_HANDLING=1
+
+# 其他优化
+export PYTHONUNBUFFERED=1
+export DS_SKIP_CUDA_CHECK=1
+export DEEPSPEED_USE_TORCH_ADAM=1
 
 # ========================================================
 # 2. 路径定义
 # ========================================================
 MODEL_TYPE="phi-1.5"
-BASE_MODEL="./checkpoints-finetune/bunny-phi1.5-mixed-lora-695k/checkpoint-23476"
-OUTPUT_DIR="./checkpoints-stage3/bunny-phi1.5-full-finetune-modified"  #我们重新设计了第三个阶段代码
+
+# [输入] 指向 Stage 1 (或 Stage 2) 的产出目录
+# 确保这个目录下有 config.json, model.safetensors 等完整文件
+BASE_MODEL="/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_continued"
+
+# [输出] Stage 3 的保存位置
+OUTPUT_DIR="./checkpoints-stage3/bunny-phi1.5-full-finetune-final"
+
+# [数据] Stage 3 的高质量混合数据
 DATA_PATH="/mnt/conda_data/Bunny-v1.1-data/finetune/bunny_stage3_cleaned.json"
 IMAGE_PATH="/"
-# 关键：指向 Stage 1 跑出来的那个包含 117 个 Key 的文件
-export PYTHONUNBUFFERED=1
-export PYTORCH_ALLOC_CONF=expandable_segments:True
-export DS_SKIP_CUDA_CHECK=1
-export DEEPSPEED_USE_TORCH_ADAM=1
-export NCCL_DEBUG=INFO  # 开启调试模式，这样卡住时能看到为什么卡
-export NCCL_SOCKET_IFNAME=eth0 
-export GLOO_SOCKET_IFNAME=eth0
-export NCCL_BLOCKING_WAIT=1
-export NCCL_TIMEOUT=9600
-export NCCL_ASYNC_ERROR_HANDLING=1
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512"
+
 # ========================================================
-# 3. 启动训练 (Stage 2: Instruction Tuning)
+# 3. 启动全量微调 (Full Fine-tuning)
 # ========================================================
-# 注意：这里我们使用 Zero-3 (如果显存够用 Zero-2 也可以，但 LoRA + 2M 数据建议 Zero-3 更稳)
-# 增加了 --lora_enable 等参数，用的是经过精选后的数据
+# 继承 Stage 2 的成功参数：LR=2e-5, Cosine Scheduler
+# 区别：关闭 LoRA，开启全参数更新
 
 deepspeed \
     --hostfile $HOSTFILE \
@@ -61,23 +73,20 @@ deepspeed \
     --num_train_epochs 1 \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 4 \
+    --gradient_accumulation_steps 8 \
     --eval_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 1000 \
+    --save_steps 500 \
     --save_total_limit 10 \
-    --learning_rate 1e-7 \
+    --learning_rate 2e-5 \
     --max_grad_norm 1.0 \
     --weight_decay 0. \
-    --warmup_ratio 0.2 \
+    --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
-    --logging_steps 10 \
+    --logging_steps 1 \
     --model_max_length 2048 \
     --gradient_checkpointing True \
     --group_by_modality_length True \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \
     --report_to none 2>&1 | tee $OUTPUT_DIR/finetunefull.log
-
-
-###--group_by_modality_length True  这个必须要的
