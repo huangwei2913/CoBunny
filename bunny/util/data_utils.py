@@ -87,6 +87,17 @@ def preprocess(
         # 带有 <img_content> 和 Image 1: ... 的文本了
         conversations.append(conv.get_prompt())
 
+        # if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        #     if i == 0: # 只打印这批数据的第一个样本，防止刷屏
+        #         print("\n" + "👁️"*20)
+        #         print("【DEBUG 1: 原始 Prompt 模板长这样】")
+        #         print("请仔细检查里面是 USER: 还是 <|user|>，以及有没有特殊的 System Prompt。")
+        #         print("-" * 40)
+        #         print(repr(conv.get_prompt())) # 用 repr 打印，连 \n 都能显示出来
+        #         print("👁️"*20 + "\n")
+
+
+
     # Tokenize 逻辑
     if has_image:
         input_ids = torch.stack(
@@ -145,21 +156,25 @@ def preprocess(
     #print("🚀 [PREPROCESS DEBUG] 检查 Label 遮蔽是否精准:")
     
     decoded_output = []
+    hardcore_tokens = [] # 存储 "ID:文本:状态" 的硬核信息
     for token_id, label_id in zip(debug_input, debug_label):
         # 【修改这里】：如果 token_id 是负数（如图像 token -200），手动转成文本
         if token_id < 0:
             token_text = f"<IMG_{token_id}>"
         else:
             token_text = tokenizer.decode([token_id])
+        display_text = token_text.replace('\n', '\\n')
         
         if label_id == IGNORE_INDEX:
             decoded_output.append(f"\033[90m{token_text}\033[0m")
+            hardcore_tokens.append(f"\033[90m[{token_id}:{display_text}:IGN]\033[0m")
         else:
             decoded_output.append(f"\033[92m{token_text}\033[0m")
-
+            hardcore_tokens.append(f"\033[92m[{token_id}:{display_text}:LBL]\033[0m")
     #print("".join(decoded_output))
     #print("="*50 + "\n")
-
+    #print("\n👉 [2. 机器硬核 Token 模式 (查 BOS/EOS 专用)]：")
+    #print(" ".join(hardcore_tokens))
     input_ids = input_ids.view(-1)
     targets = targets.view(-1)
 
@@ -501,7 +516,7 @@ def make_supervised_data_module(tokenizer, data_args) -> Dict:
     val_size = 2000
     val_list = list_data_dict[:val_size]
     train_list = list_data_dict[val_size:]
-    
+
     rank0_print(f"📂 [Data] 名单切分完成: 训练集 {len(train_list)}, 验证集 {len(val_list)}")
 
     # 3. 分别创建两个独立的 LazySupervisedDataset 实例

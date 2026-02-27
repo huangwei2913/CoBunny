@@ -1566,3 +1566,47 @@ deepspeed \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \
     --report_to none 2>&1 | tee $OUTPUT_DIR/finetunesharegpt.log
+
+------------------------------------------------------
+也就是说永远不要手写模版
+from bunny import conversation as conversation_lib
+from bunny.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
+from bunny.util.mm_utils import tokenizer_image_token
+import torch
+
+def generate_inference_input(question, tokenizer, device="cuda"):
+    # 1. 复制官方预定义的模板 (一定要选对名字，通常是 "phi" 或 "bunny")
+    # 对应你 data_utils.py 里的 conversation_lib.default_conversation.copy()
+    conv = conversation_lib.default_conversation.copy()
+    
+    # 2. 构造符合规范的消息格式
+    # 注意：DEFAULT_IMAGE_TOKEN 会被 preprocess_multimodal 替换为 <img_content>
+    image_token = DEFAULT_IMAGE_TOKEN 
+    message = f"{image_token}\n{question}"
+    
+    # 3. 按照对话轮次填充内容
+    # roles[0] 是 Human/User, roles[1] 是 GPT/Assistant
+    conv.append_message(conv.roles[0], message)
+    conv.append_message(conv.roles[1], None)
+    
+    # 4. 获取最终的 Prompt 字符串
+    # 这步会生成你 Log 里看到的 "A chat between a curious user..." 完整文本
+    prompt = conv.get_prompt()
+    
+    # --- 调试打印：确认生成的字符串是否带有了 System Prompt ---
+    # print(f"DEBUG PROMPT: {repr(prompt)}")
+    
+    # 5. 使用专用的 tokenizer 转换成 input_ids
+    # 这样能确保图像占位符被正确识别，且 BOS 逻辑被处理
+    input_ids = tokenizer_image_token(
+        prompt, 
+        tokenizer, 
+        IMAGE_TOKEN_INDEX, 
+        return_tensors='pt'
+    ).unsqueeze(0).to(device)
+    
+    return input_ids, prompt
+
+# 使用方法：
+question = "What is in the image?"
+input_ids, final_prompt = generate_inference_input(question, tokenizer)

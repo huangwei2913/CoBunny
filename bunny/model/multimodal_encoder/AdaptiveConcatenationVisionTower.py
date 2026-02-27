@@ -171,9 +171,13 @@ class ImageProcessorMultipleEncoders:
         return {"pixel_values": torch.stack(stacked).contiguous()}
 
 class AdaptiveConcatenationVisionTower(nn.Module):
-    def __init__(self, vision_tower, args, delay_load=False):
+    def __init__(self, vision_tower, args,  **kwargs):  #参数要透传到子模块中去
         super().__init__()
         self.is_loaded = False
+        self.training_stage = kwargs.get('training_stage', getattr(args, 'training_stage', 'inference'))  
+        print(f"🎨 [MixedEncoder] 成功识别training_stage: {self.training_stage}")
+        self.delay_load = kwargs.get('delay_load', False) 
+        print(f"🎨 [MixedEncoder] 成功识别delay_load: {self.delay_load}")    
         self.args = args
         self.global_dimension = getattr(args, "mm_hidden_size", 1024)
         self.compression_K = getattr(args, "compression_K", 8)
@@ -183,26 +187,22 @@ class AdaptiveConcatenationVisionTower(nn.Module):
         self.image_processor = ImageProcessorMultipleEncoders()
         self.unfreeze_mm_vision_tower = getattr(args, 'unfreeze_mm_vision_tower', False)
         self.args = args
-
-        self.dino_vision_tower = DinoVisionTower(args.vision_tower_dino, args, delay_load=delay_load)
-        self.siglip_vision_tower = SiglipVisionTower(args.vision_tower_siglip, args, delay_load=delay_load)
+        self.dino_vision_tower = DinoVisionTower(args.vision_tower_dino, args, **kwargs)
+        self.siglip_vision_tower = SiglipVisionTower(args.vision_tower_siglip, args, **kwargs)
         self.mlp_layers = nn.ModuleList([
             nn.Linear(self.dino_vision_tower.hidden_size, self.global_dimension),
             nn.Linear(self.siglip_vision_tower.hidden_size, self.global_dimension)
         ])
-
         self.dino_projector = nn.Linear(768, 1024)   #两个视觉编码器融合前需要对齐维度数，dino通常返回的是768维度
         self.siglip_projector = nn.Linear(1152, 1024)  ##两个视觉编码器融合前需要对齐维度数，siglip通常返回的是1152维度
         self.saliency_sampler = FoveatedAnchorSampler(embed_dim=self.global_dimension)
         self.cross_attn_dino_q = nn.ModuleList([
             CrossAttentionBlock(dim=1024, num_heads=self.num_heads) for _ in range(self.dino_vision_tower.layer_count)
         ])
-
         # path_B: SigLIP as Query
         self.cross_attn_siglip_q = nn.ModuleList([
             CrossAttentionBlock(dim=1024, num_heads=self.num_heads) for _ in range(self.dino_vision_tower.layer_count)
         ])
-
         #针对于全局图的多层自适应增强cls token
         self.gate_mlps = nn.ModuleList([
             nn.Sequential(
@@ -211,71 +211,45 @@ class AdaptiveConcatenationVisionTower(nn.Module):
             nn.Linear(512, 1) # 输出标量权重
             ) for _ in range(self.dino_vision_tower.layer_count)
         ])
-
-        if not delay_load: 
+        self.n_sep1_embed = nn.Parameter(torch.randn(1, 1, 1024) * 0.02)
+        self.n_sep2_embed = nn.Parameter(torch.randn(1, 1, 1024) * 0.02)
+        self.n_end_embed  = nn.Parameter(torch.randn(1, 5, 1024) * 0.02)
+        if not self.delay_load: 
             self.load_model()
-
 
     def _set_subtower_grad_state(self):
         """统一管理子塔的梯度和模式状态"""
+        # 这里的打印直接说明当前的业务意图
+        mode_desc = "🚀 [全量微调/全参数模式]" if self.unfreeze_mm_vision_tower else "🔒 [冻结模式/只读推理模式]"
+        print(f"🛠️  [MixedEncoder 属性设定] 业务意图: {mode_desc}")
+        is_actually_unfreezing = (self.training_stage == 'finetune') and self.unfreeze_mm_vision_tower
         for sub_tower in [self.siglip_vision_tower, self.dino_vision_tower]:
             if sub_tower is not None:
-                # 🚨 修复关键：判断是否有 config 属性再赋值
+                # 注入属性
                 if hasattr(sub_tower, 'config'):
-                    sub_tower.config.unfreeze_mm_vision_tower = self.unfreeze_mm_vision_tower
+                    sub_tower.config.unfreeze_mm_vision_tower = is_actually_unfreezing
+                sub_tower.unfreeze_mm_vision_tower = is_actually_unfreezing
                 
-                # 既然 DINO 没有 config，我们就直接把属性挂在它对象上，
-                # 这样以后 check 属性时也能找到，且不会报错
-                sub_tower.unfreeze_mm_vision_tower = self.unfreeze_mm_vision_tower
-                
-                if self.unfreeze_mm_vision_tower:
+                # 获取名字，如果是 DINO 或 SigLIP 应该能看出来
+                t_name = getattr(sub_tower, "vision_tower_name", "Sub-Tower")
+
+                if is_actually_unfreezing:
                     sub_tower.requires_grad_(True)
                     sub_tower.train()
+                    print(f"   💡 子塔 {t_name}: 已解锁权重。它将随主模型一起更新（微调必备）。")
                 else:
                     sub_tower.requires_grad_(False)
                     sub_tower.eval()
+                    print(f"   💡 子塔 {t_name}: 已锁定权重。它将作为纯特征提取器使用（预训练/推理必备）。")
+
 
     def load_model(self):
-
-        def check_tower_valid(tower, attr_name):
-            try:
-                # 检查子塔是否已经具备了 Backbone 实例
-                if hasattr(tower, attr_name):
-                    param = next(tower.parameters())
-                    # 只有当权重不是随机初始化的（std=1.0）且有数值时才有效
-                    return param.numel() > 0 and torch.std(param.data).item() != 1.0
-            except:
-                return False
-            return False
-        
-
-        # 1. 尝试探测当前内存中的权重是否为“有效”权重
-        siglip_valid = check_tower_valid(self.siglip_vision_tower, 'vision_tower')
-        dino_valid = check_tower_valid(self.dino_vision_tower, 'vision_tower')
-        
-        is_weight_valid = siglip_valid and dino_valid
-        
-
-        # 2. 身份识别与自动回退
-        if self.is_loaded or is_weight_valid:
-            # 情况 A: 权重已经正确加载（来自 Checkpoint）
-            print("🚀 [Weight Verified] 检测到有效权重，跳过官方路径加载。")
-            self._set_subtower_grad_state()
-            self.is_loaded = True
+        if self.is_loaded:
             return
-        else:
-            # 情况 B: 权重是随机的（Checkpoint 没喂进去或 Key 没对上）
-            # 这种情况我们要强制执行官方加载，确保模型不崩
-            if is_weight_valid == False and getattr(self.args, 'model_name_or_path', None):
-                print("⚠️ [Warning] Checkpoint 中未发现有效的视觉塔权重（可能 Key 不匹配）！")
-                print("🛠️ [Fallback] 正在回退至官方初始权重以确保训练/推理正确...")
-            
-            print(f"🏗️ 加载 DINO 官方权重: {self.args.vision_tower_dino}")
-            self.dino_vision_tower.load_model()
-            print(f"🏗️ 加载 SigLIP 官方权重: {self.args.vision_tower_siglip}")
-            self.siglip_vision_tower.load_model()
-            self._set_subtower_grad_state()
-            self.is_loaded = True
+        self.dino_vision_tower.load_model()
+        self.siglip_vision_tower.load_model()
+        self._set_subtower_grad_state()
+        self.is_loaded = True
 
     @property
     def dtype(self): return self.mlp_layers[0].weight.dtype
@@ -397,7 +371,7 @@ class AdaptiveConcatenationVisionTower(nn.Module):
 
         final_global_cls_tokens = torch.cat(enhanced_global_tokens_list, dim=1)  #[B, 4, 1024]
         if rank == 0 and not hasattr(self, "has_printed_fusion"):
-            print(f"🔥 [FUSION] Global CLS Fusion Complete. Shape: {final_global_cls_tokens.shape}")
+            #print(f"🔥 [FUSION] Global CLS Fusion Complete. Shape: {final_global_cls_tokens.shape}")
             self.has_printed_fusion = True
 
         ###############################################################################################
@@ -483,32 +457,53 @@ class AdaptiveConcatenationVisionTower(nn.Module):
         # 顺序：[Global Soul (4)] + [Center Base (144)] + [Corner Gems (210)]
         # 总计：358 Tokens
         
-        final_embedding = torch.cat([
-            final_global_cls_tokens,   # [B, 4, 1024]
-            center_base,        # [B, 144, 1024]
-            selected_patches    # [B, 210, 1024]
-        ], dim=1)
+        # final_embedding = torch.cat([
+        #     final_global_cls_tokens,   # [B, 4, 1024]
+        #     center_base,        # [B, 144, 1024]
+        #     selected_patches    # [B, 210, 1024]
+        # ], dim=1)
 
   
-        # =========================================================
-        # 🕵️ RANK 0 深度 Token 审计 (放入 forward 结尾)
-        # =========================================================
-        if rank == 0:
-            print(f"\n" + "📊" * 10 + " [TOKEN 组成审计] " + "📊" * 10)
-            print(f"1. 【灵魂层】Global Soul Tokens (Fusion): {final_global_cls_tokens.shape}")
-            print(f"2. 【骨架层】Center Base (12x12):        {center_base.shape}")
-            print(f"3. 【血肉层】Selected Corner Patches:   {selected_patches.shape}")
-            print(f"--------------------------------------------------")
-            print(f"🚀 [最终合体] Final Embedding Shape:    {final_embedding.shape}")
+        # # =========================================================
+        # # 🕵️ RANK 0 深度 Token 审计 (放入 forward 结尾)
+        # # =========================================================
+        # if rank == 0:
+        #     print(f"\n" + "📊" * 10 + " [TOKEN 组成审计] " + "📊" * 10)
+        #     print(f"1. 【灵魂层】Global Soul Tokens (Fusion): {final_global_cls_tokens.shape}")
+        #     print(f"2. 【骨架层】Center Base (12x12):        {center_base.shape}")
+        #     print(f"3. 【血肉层】Selected Corner Patches:   {selected_patches.shape}")
+        #     print(f"--------------------------------------------------")
+        #     print(f"🚀 [最终合体] Final Embedding Shape:    {final_embedding.shape}")
             
-            # 关键：检查是否达到了你预期的 365
-            expected_total = 365
-            actual_total = final_embedding.shape[1]
-            if actual_total != expected_total:
-                print(f"❌ [警报] Token 数量不匹配！预期 {expected_total}, 实际 {actual_total}")
-                print(f"💡 [提示] 你之前提到的 4+1+144+1+210+5=365 逻辑在代码中尚未体现。")
-            else:
-                print(f"✅ [对齐] 365 目标达成！")
-            print("📊" * 28 + "\n")
+        #     # 关键：检查是否达到了你预期的 365
+        #     expected_total = 365
+        #     actual_total = final_embedding.shape[1]
+        #     if actual_total != expected_total:
+        #         print(f"❌ [警报] Token 数量不匹配！预期 {expected_total}, 实际 {actual_total}")
+        #         print(f"💡 [提示] 你之前提到的 4+1+144+1+210+5=365 逻辑在代码中尚未体现。")
+        #     else:
+        #         print(f"✅ [对齐] 365 目标达成！")
+        #     print("📊" * 28 + "\n")
+      
 
-        return final_embedding, None
+        B = final_global_cls_tokens.shape[0]
+        device = final_global_cls_tokens.device
+        dtype = final_global_cls_tokens.dtype
+        # 2. 准备分隔符 (从 Parameter 拿到并 expand 到当前 Batch)
+        # n_sep1: [B, 1, 1024], n_sep2: [B, 1, 1024], n_end: [B, 5, 1024]
+        # 现在 self.n_sep1_embed 存在了，expand 就能跑通了
+        n_sep1 = self.n_sep1_embed.expand(B, -1, -1).to(device=device, dtype=dtype)
+        n_sep2 = self.n_sep2_embed.expand(B, -1, -1).to(device=device, dtype=dtype)
+        n_end  = self.n_end_embed.expand(B, -1, -1).to(device=device, dtype=dtype)
+
+        # 3. 按照 4 + 1 + 144 + 1 + 210 + 5 = 365 焊死
+        final_embeddings = torch.cat([
+            final_global_cls_tokens,             # 0-3
+            n_sep1,           # 4 (Separator 1)
+            center_base,      # 5-148
+            n_sep2,           # 149 (Separator 2)
+            selected_patches, # 150-359
+            n_end             # 360-364 (End padding)
+        ], dim=1)
+        #print(f"🚀 [混合塔返回特征] Final Embedding Shape:    {final_embeddings.shape}")
+        return final_embeddings, None

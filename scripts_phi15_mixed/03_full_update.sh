@@ -31,19 +31,19 @@ export DEEPSPEED_USE_TORCH_ADAM=1
 # ========================================================
 MODEL_TYPE="phi-1.5"
 
-# [输入] 指向 Stage 1 (或 Stage 2) 的产出目录
+# [输入] 指向 Stage 1 (或 Stage 2) 的产出目录,也就说当存储一个checkpoint后，我们应该用整理好的这个final-fp16
 # 确保这个目录下有 config.json, model.safetensors 等完整文件
-BASE_MODEL="/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_continued"
-
+BASE_MODEL="/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_modified/checkpoint-31216"
+#由于重新开有问题，那我们就
 # [输出] Stage 3 的保存位置
-OUTPUT_DIR="./checkpoints-stage3/bunny-phi1.5-full-finetune-final"
+OUTPUT_DIR="./checkpoints-stage3/bunny-phi1.5-full-finetune_modified"
 
 # [数据] Stage 3 的高质量混合数据
 DATA_PATH="/mnt/conda_data/Bunny-v1.1-data/finetune/bunny_stage3_cleaned.json"
 IMAGE_PATH="/"
 
 # ========================================================
-# 3. 启动全量微调 (Full Fine-tuning)
+# 3. 启动全量微调 (Full Fine-tuning)yuuuuuuuuuuuuuuuuuuuuuuuuu
 # ========================================================
 # 继承 Stage 2 的成功参数：LR=2e-5, Cosine Scheduler
 # 区别：关闭 LoRA，开启全参数更新
@@ -70,14 +70,14 @@ deepspeed \
     --bf16 False \
     --fp16 True \
     --output_dir $OUTPUT_DIR \
-    --num_train_epochs 1 \
+    --num_train_epochs 2 \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 8 \
     --eval_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \
-    --save_total_limit 10 \
+    --save_total_limit 5 \
     --learning_rate 2e-5 \
     --max_grad_norm 1.0 \
     --weight_decay 0. \

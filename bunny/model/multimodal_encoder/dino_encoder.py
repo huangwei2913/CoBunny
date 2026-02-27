@@ -62,18 +62,21 @@ from safetensors.torch import load_file
 # DINOv3_MODEL_INFO, DINOv3_INTERACTION_INDEXES, load_dinov3_model 需确保在上下文中可用
 
 class DinoVisionTower(BaseVisionTower):
-    def __init__(self, vision_tower, args, delay_load=False):
-        super(DinoVisionTower, self).__init__(vision_tower, args, delay_load)
+    def __init__(self, vision_tower, args,**kwargs):
+        super(DinoVisionTower, self).__init__(vision_tower, args,**kwargs)
         
         # 1. 基础参数定义
-        self._vision_tower_name = vision_tower
+        self.vision_tower_name = vision_tower
         self._image_size = 384    # DinoV3 默认常用尺寸
         self._patch_size = 16 
         self._num_patches_cached = None 
         self.is_loaded  = False
         self.model_name = "dinounet_b"
         self.interaction_indexes = [2, 5, 8, 11]
-        
+        self.training_stage = kwargs.get('training_stage', getattr(args, 'training_stage', 'inference'))  
+        print(f"🎨 [DinoVisionTower] 成功识别training_stage: {self.training_stage}")
+        self.delay_load = kwargs.get('delay_load', False) 
+        print(f"🎨 [DinoVisionTower] 成功识别delay_load: {self.delay_load}")   
         # 混合编码器对齐关键参数
         self.target_grid_size = getattr(args, "mm_vision_grid_size", 24)
         self.target_N = self.target_grid_size * self.target_grid_size
@@ -84,7 +87,7 @@ class DinoVisionTower(BaseVisionTower):
 
         # 2. Config 信息预加载（确保 delay_load 模式下属性依然可用）
         try:
-            self.cfg_only = AutoConfig.from_pretrained(self._vision_tower_name)
+            self.cfg_only = AutoConfig.from_pretrained(self.vision_tower_name)
         except Exception as e:
             from transformers import PretrainedConfig
             self.cfg_only = PretrainedConfig(hidden_size=self._hidden_size, image_size=self._image_size)
@@ -97,46 +100,26 @@ class DinoVisionTower(BaseVisionTower):
         if self.is_loaded:
             print(f"✅ [DinoVisionTower] 状态已锁定，无需重复加载，保护当前显存权重。")
             return
-        # 1. 灵魂探测：利用 Python 反射机制检查 builder.py 是否已完成权重注入
-        has_soul = False
-        
-        # 检查属性是否存在（空降属性检查）
-        if hasattr(self, 'vision_tower') and self.vision_tower is not None:
-            try:
-                # 获取第一个参数的权重分布
-                param = next(self.vision_tower.parameters())
-                # 如果 std != 1.0，说明这是一个被训练过或从 checkpoint 恢复的有灵魂的权重
-                if param.numel() > 0 and torch.std(param.data).item() != 1.0:
-                    has_soul = True
-            except (StopIteration, AttributeError):
-                pass
-
-        # 2. 决策：如果有灵魂，坚决不加载底座，防止 0.65 成果被官方权重“污染”
-        if has_soul:
-            print(f"🚀 [DINO Safe Load] 确认：微调后的视觉灵魂已由外部注入，拒绝官方底座覆盖。")
-        else:
-            # 只有在架构确实为空（如 Stage 1）或注入失败时，才执行手动加载
-            print(f"🏗️ [DINO Initial Load] 探测不到有效权重，正在加载官方底座: {self.model_name}")
-            # 这里调用你原来的加载工具函数
-            self.vision_tower = load_dinov3_model(self.model_name, self.pretrained_path)
-
-        # 3. 意志同步：状态对齐与 T4 硬件适配 (Tesla T4 推理必须强制 FP16)
-        self.vision_tower.to(device=self.device, dtype=torch.float16)
-
-        if self.unfreeze_mm_vision_tower:
-            self.vision_tower.requires_grad_(True)
-            self.vision_tower.train()  # 必须开启训练模式以支持反向传播
-            print(f"🔥 [DINO State] Full Parameter Fine-tuning Enabled (TRAIN模式).")
-        else:
-            self.vision_tower.requires_grad_(False)
-            self.vision_tower.eval()   # 推理模式
-            print(f"❄️ [DINO State] Inference Mode Enabled (EVAL模式).")
-
-        # 4. 补全预处理器（注入机制通常不带这个）
-        self.image_processor = AutoImageProcessor.from_pretrained(self._vision_tower_name)
+        # 2. 核心决策逻辑：搭架子还是装权重？
+        if self.training_stage  in ["finetune", "inference"]:
+            # 【搭架子模式】：微调和推理时，我们只需要物理架构
+            # 权重会由 BunnyMetaModel 后续通过全量 Checkpoint 注入
+            print(f"🏗️ [DINO 执行层] 身份: {self.training_stage } -> 模式: 仅构建物理架构 (Skeleton Only)")
             
+            # 使用工厂函数直接创建架构，pretrained 设为 False
+            model_factory = DINOv3_MODEL_FACTORIES[self.model_name]
+            self.vision_tower = model_factory(pretrained=False)
+        else:  #第一个阶段
+            # 【官方加载模式】：预训练第一阶段（Stage 1）
+            # 此时没有全量 Checkpoint，必须加载官方原始权重
+            print(f"🛒 [DINO 执行层] 身份: {self.training_stage} -> 模式: 加载官方预训练权重")
+            self.vision_tower = load_dinov3_model(self.model_name, self.pretrained_path)
+        
+        self.vision_tower.to(device=self.device, dtype=torch.float16)
+        self.image_processor = AutoImageProcessor.from_pretrained(self.vision_tower_name)
         self.is_loaded = True
-
+        print(f"✅ [DinoVisionTower] 装载任务执行完毕。")
+       
     def _forward(self, images):
         # 确保输入精度一致
         images = images.to(device=self.device, dtype=self.dtype)

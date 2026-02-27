@@ -27,7 +27,7 @@ class ProcessorWrapper:
 
 
 class BaseVisionTower(nn.Module):
-    def __init__(self, vision_tower_name, args, delay_load=False):
+    def __init__(self, vision_tower_name, args, delay_load=False, **kwargs):
         super(BaseVisionTower, self).__init__()
         self.is_loaded = False
         self.args = args
@@ -36,6 +36,9 @@ class BaseVisionTower(nn.Module):
         self.unfreeze_mm_vision_tower = getattr(args, 'unfreeze_mm_vision_tower', False)
         self.vision_tower = None
         self.delay_load = delay_load
+        self.training_stage = kwargs.get('training_stage', 'inference') 
+        # 如果你想更彻底，可以把整个 kwargs 存起来备用
+        self.kwargs = kwargs
 
     @abstractmethod
     def load_model(self, device_map=None):

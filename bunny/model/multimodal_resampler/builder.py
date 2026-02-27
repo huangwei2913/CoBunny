@@ -7,7 +7,7 @@ from .vlm_attention import VlmAttention
 from .perceiver import DynamicCompressor
 
 class IdentityMap(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, *args, **kwargs): # 加上这个，吃掉所有传进来的指令
         super().__init__()
 
     def forward(self, x, *args, **kwargs):
@@ -17,9 +17,9 @@ class IdentityMap(torch.nn.Module):
     def config(self):
         return {"mm_resampler_type": None}
 
-def build_vision_resampler(model_args, delay_load=False, **kwargs):
-    # import pdb;pdb.set_trace()
-    resampler_type = getattr(model_args, 'mm_resampler_type', None)  #在本项目中没有被用到，都是None
+def build_vision_resampler(model_args, **kwargs):
+    resampler_type = getattr(model_args, 'mm_resampler_type', None)
+
     if resampler_type == 'masked_drop':
         return MaskedDrop(model_args)
     elif resampler_type == 'spatial_pool':
@@ -27,10 +27,11 @@ def build_vision_resampler(model_args, delay_load=False, **kwargs):
     elif resampler_type == 'qformer':
         return Qformer(model_args, **kwargs)
     elif resampler_type == 'vlm_attention':
-        return VlmAttention(model_args,**kwargs)
+        return VlmAttention(model_args, **kwargs)
     elif resampler_type == 'dynamic_compressor':
         return DynamicCompressor(model_args, **kwargs)
     elif resampler_type is None:
-        return IdentityMap()
+        # 现在的 IdentityMap 已经能吃下 kwargs 了
+        return IdentityMap(**kwargs) 
     else:
         raise ValueError(f'Unknown resampler type: {resampler_type}')

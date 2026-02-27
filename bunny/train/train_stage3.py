@@ -11,7 +11,7 @@ from bunny import conversation as conversation_lib
 from bunny.model import *
 from bunny.util.data_utils import make_supervised_data_module, DataArguments
 from arguments import ModelArguments,TrainingArguments
-
+import json
 
 local_rank = None
 def rank0_print(*args):
@@ -21,6 +21,88 @@ def rank0_print(*args):
 
 def checkpoint_has_trainer_state(checkpoint_dir):
     return os.path.exists(os.path.join(checkpoint_dir, "trainer_state.json"))
+
+
+import re
+
+def get_checkpoint_number(path):
+    # 正则匹配路径最后的数字
+    matches = re.findall(r"checkpoint-(\d+)", str(path))
+    return int(matches[-1]) if matches else 0
+
+
+import hashlib
+import json
+
+def get_tensor_md5(tensor):
+    # 取前 100 个元素的特征来快速生成指纹，防止全量计算太慢
+    content = tensor.detach().cpu().numpy().tobytes()
+    return hashlib.md5(content).hexdigest()
+
+
+def save_v365_artifacts(model, output_dir, training_args):
+    """
+    通用函数：在指定的 output_dir 中生成原子包和审计报告
+    """
+    if training_args.local_rank > 0:
+        return
+
+    rank0_print(f"📦 [V365 Protocol] 正在目录 {output_dir} 中部署审计与回填包...")
+    
+    # 1. 准备目录
+    atomic_dir = os.path.join(output_dir, "atomic_weights_v365")
+    os.makedirs(atomic_dir, exist_ok=True)
+
+    # 2. 获取视觉塔实体
+    raw_model = model.module if hasattr(model, "module") else model
+    vt = raw_model.get_vision_tower()
+    
+    # 3. 导出原子包 (Backbones & Glue)
+    # --- DINO ---
+    if hasattr(vt, 'dino_vision_tower'):
+        dino_m = vt.dino_vision_tower.vision_tower
+        torch.save(dino_m.state_dict(), os.path.join(atomic_dir, "sub_dino_backbone.pth"))
+    
+    # --- SigLIP ---
+    if hasattr(vt, 'siglip_vision_tower'):
+        siglip_m = vt.siglip_vision_tower.vision_tower
+        torch.save(siglip_m.state_dict(), os.path.join(atomic_dir, "sub_siglip_backbone.pth"))
+
+    # --- Glue (Projector, Resampler, etc.) ---
+    glue_state = {}
+    backbone_prefixes = ['dino_vision_tower.vision_tower', 'siglip_vision_tower.vision_tower']
+    for name, param in vt.named_parameters():
+        if not any(name.startswith(p) for p in backbone_prefixes):
+            glue_state[name] = param.detach().cpu()
+    for name, buf in vt.named_buffers():
+        if not any(name.startswith(p) for p in backbone_prefixes):
+            glue_state[name] = buf.detach().cpu()
+    torch.save(glue_state, os.path.join(atomic_dir, "vision_glue_v365.pth"))
+
+    # 4. 生成 vision_audit.json (MD5 报告)
+    audit_report = {
+        "model_type": "bunny-phi-v365",
+        "path": output_dir,
+        "weights": {}
+    }
+    
+    for name, param in vt.named_parameters():
+        audit_report["weights"][name] = {
+            "shape": list(param.shape),
+            "md5": get_tensor_md5(param),
+            "is_buffer": False
+        }
+    for name, buf in vt.named_buffers():
+        audit_report["weights"][name] = {
+            "shape": list(buf.shape),
+            "md5": get_tensor_md5(buf),
+            "is_buffer": True
+        }
+
+    with open(os.path.join(output_dir, "vision_audit.json"), "w") as f:
+        json.dump(audit_report, f, indent=4)
+    
+    rank0_print(f"✅ [V365 Done] 审计完成。该 Checkpoint 现在具备‘身份自证明’能力。")
 
 
 def train():
@@ -35,7 +117,6 @@ def train():
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
     model_args.unfreeze_mm_vision_tower = True  # 解冻视觉塔
     training_args.freeze_mm_mlp_adapter = False # 解冻 Projector     
-
     import sys
     if training_args.local_rank == 0 or training_args.local_rank == -1:
         print("\n" + "="*50)
@@ -232,6 +313,7 @@ def train():
     model.config.model_type = model_args.model_type
     model.config.lora_enable = training_args.lora_enable
     model.config.version = model_args.version
+    model.config.training_stage = "finetune" #历史原因哈，实际上就是应该确保config.json里面的这个值是finetue
     # 10. 模板与数据加载
 # =========================================================
     # 模板初始化与强校验
@@ -267,13 +349,32 @@ def train():
     data_args.version = model_args.version
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
 
-    # =========================================================
+    from transformers import TrainerCallback
+
+    class V365AuditCallback(TrainerCallback):
+        def on_save(self, args, state, control, **kwargs):
+            if args.local_rank <= 0:
+                checkpoint_folder = f"checkpoint-{state.global_step}"
+                output_path = os.path.join(args.output_dir, checkpoint_folder)
+                
+                # 安全获取 model，如果拿不到就从 trainer 里拿
+                model = kwargs.get('model')
+                if model is None and 'trainer' in kwargs:
+                    model = kwargs['trainer'].model
+                
+                if model is not None:
+                    # 已经彻底去掉了对 tokenizer 的依赖，安全！
+                    save_v365_artifacts(model, output_path, args)
+                else:
+                    rank0_print("⚠️ [V365 Warning] 无法在回调中找到 model 实例，跳过审计保存。")
+        # =========================================================
     # 13. Trainer 初始化
     # =========================================================
     trainer = BunnyTrainer(
         model=model,
         tokenizer=tokenizer,
         args=training_args,
+        callbacks=[V365AuditCallback()],
         **data_module
     )
 
@@ -292,8 +393,6 @@ def train():
         rank0_print(f"📊 总可训练参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
         rank0_print("="*60 + "\n")
     
-
-
     # train_stage3.py
     test_id = tokenizer.convert_tokens_to_ids("<img_content>")
     assert test_id == model.config.image_token_index, "Tokenizer ID 与模型配置不符！"
@@ -302,7 +401,7 @@ def train():
     # =========================================================
     checkpoints = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
     if checkpoints:
-        latest_ckpt = str(sorted(checkpoints)[-1])
+        latest_ckpt = str(sorted(checkpoints, key=get_checkpoint_number)[-1])
         if checkpoint_has_trainer_state(latest_ckpt):
             rank0_print(f"🔄 Resuming from checkpoint: {latest_ckpt}")
             trainer.train(resume_from_checkpoint=latest_ckpt)
@@ -316,35 +415,112 @@ def train():
     # 保存最终状态
     trainer.save_state()
     
-
-
     # =========================================================
-    # 15. 最终全量保存 (Stage 3 核心)
+    # 15. 最终全量保存 (Stage 3 增强版：原子级回填包)
     # =========================================================
     if training_args.local_rank <= 0:
-        rank0_print("📢 [Stage 3] 训练结束，开始执行全量保存...")
+        rank0_print("📢 [Stage 3] 训练完成，正在导出‘原子级回填包’以防权重被官方覆盖...")
 
-        # 如果用了 LoRA，必须合并
+        # 1. 处理 LoRA 合并 (如果启用)
         if training_args.lora_enable:
-            rank0_print("📎 Merging LoRA weights back to base model...")
+            rank0_print("📎 合并 LoRA 权重中...")
             model = model.merge_and_unload()
-            model.config.lora_enable = False # 更新配置
+            model.config.lora_enable = False
 
-        # 强制将所有子模块的 Buffer 标记为 persistent=True
+        # 2. 关键：强制物化所有 Buffer 并标记为持久化
+        # 这一步是为了防止 position_ids 等在保存时被漏掉
         for name, module in model.named_modules():
             for buf_name, buf in module.named_buffers(recurse=False):
-                # 将 buffer 重新注册为持久化，这样它就会被存入 pytorch_model.bin
                 module.register_buffer(buf_name, buf, persistent=True)
-        # 强制全量保存 (Config + Weights + Tokenizer)
+
+        # 3. 维度 A：HuggingFace 标准全量保存 (from_pretrained 用)
         model.save_pretrained(training_args.output_dir)
         tokenizer.save_pretrained(training_args.output_dir)
+        # 1. 准备专门的目录
+        atomic_dir = os.path.join(training_args.output_dir, "atomic_weights_v365")
+        os.makedirs(atomic_dir, exist_ok=True)
+
+        # 获取原始模型
+        raw_model = model.module if hasattr(model, "module") else model
+        vision_tower = raw_model.get_vision_tower()
+
+        # --- (1) 导出子塔骨干权重 (Backbone) ---
+        # 我们直接深入到最底层的 .vision_tower 成员，确保只存 Transformer 权重
+        if hasattr(vision_tower, 'dino_vision_tower'):
+            rank0_print("💾 导出 DINO Backbone...")
+            dino_m = vision_tower.dino_vision_tower.vision_tower
+            # 【核心修复】强制让所有参数出现在 state_dict 中
+            for p in dino_m.parameters():
+                p.requires_grad = True
+            torch.save(dino_m.state_dict(), os.path.join(atomic_dir, "sub_dino_backbone.pth"))    
+   
+
+        if hasattr(vision_tower, 'siglip_vision_tower'):
+            rank0_print("💾 导出 SigLIP Backbone...")
+            siglip_m = vision_tower.siglip_vision_tower.vision_tower
+            for p in siglip_m.parameters():
+                p.requires_grad = True
+            torch.save(siglip_m.state_dict(), os.path.join(atomic_dir, "sub_siglip_backbone.pth"))
+
+        # --- (2) 导出 365 协议粘合层 (Glue) ---
+        # 这里我们采用“排除法”，把 vision_tower 中不属于上面两个 backbone 的参数全抓出来
+        rank0_print("💾 导出 365 协议粘合层 (包含 Projector, CrossAttn, Sampler)...")
+        glue_state = {}
+        backbone_prefixes = ['dino_vision_tower.vision_tower', 'siglip_vision_tower.vision_tower']
         
+        for name, param in vision_tower.named_parameters():
+            if not any(name.startswith(p) for p in backbone_prefixes):
+                glue_state[name] = param.cpu().data
+                
+        # 同时抓取 Buffer (比如采样器里的 grid 或 pos_embed)
+        for name, buf in vision_tower.named_buffers():
+            if not any(name.startswith(p) for p in backbone_prefixes):
+                glue_state[name] = buf.cpu().data
+
+        torch.save(glue_state, os.path.join(atomic_dir, "vision_glue_v365.pth"))
+        
+        # --- (3) 保存词表 (非常关键，防止 Token ID 错乱) ---
+        tokenizer.save_pretrained(training_args.output_dir)
+        
+        rank0_print(f"✅ 原子级回填包已保存至: {atomic_dir}")
+      
         # 确保 generation_config 也被保存
         if hasattr(model, "generation_config"):
             model.generation_config.save_pretrained(training_args.output_dir)
 
         rank0_print(f"✅ 全量模型已完整保存至: {training_args.output_dir}")
+        rank0_print("📊 正在生成 365 协议权重审计报告 (JSON)...")
+    
+        raw_model = model.module if hasattr(model, "module") else model
+        vt = raw_model.get_vision_tower()
+        
+        audit_report = {
+            "model_type": "bunny-phi-v365",
+            "weights": {}
+        }
 
+        # 遍历视觉塔的所有参数和 Buffer
+        for name, param in vt.named_parameters():
+            audit_report["weights"][name] = {
+                "shape": list(param.shape),
+                "dtype": str(param.dtype),
+                "md5": get_tensor_md5(param),
+                "is_buffer": False
+            }
+
+        for name, buf in vt.named_buffers():
+            audit_report["weights"][name] = {
+                "shape": list(buf.shape),
+                "dtype": str(buf.dtype),
+                "md5": get_tensor_md5(buf),
+                "is_buffer": True
+            }
+
+        # 保存 JSON 审计文件
+        with open(os.path.join(training_args.output_dir, "vision_audit.json"), "w") as f:
+            json.dump(audit_report, f, indent=4)
+            
+        rank0_print("✅ 审计报告已生成。推理时只需对比 MD5 即可判断权重是否被官方覆盖。")
 
 if __name__ == "__main__":
     train()

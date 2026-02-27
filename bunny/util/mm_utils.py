@@ -54,9 +54,6 @@ def process_images(images, image_processor, model_cfg):
     return new_images
 
 
-
-
-
 #insert_separator result: [[101, 10, 20], [-200], [30, 40], [-200]]
 #final input_ids: [101, 10, 20, -200, 30, 40]
 #只要知道是在序列中加入image，让image的token进行穿插，并考虑第一个分段的其实是不是bos

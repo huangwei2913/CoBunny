@@ -10,6 +10,8 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from ..bunny_arch import BunnyMetaModel, BunnyMetaForCausalLM
 from transformers.generation import GenerationMixin # 必须导入这个
+import torch.distributed as dist
+import sys
 
 class BunnyPhiConfig(PhiConfig):
     model_type = "bunny-phi"
@@ -56,7 +58,35 @@ class BunnyPhiForCausalLM(PhiForCausalLM, BunnyMetaForCausalLM, GenerationMixin)
             return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
-        # 1. 预处理
+        # if dist.is_initialized() and dist.get_rank() == 0:
+        #     sys.stdout.write("\n" + "🔔" * 10 + " [微调数据流监控] " + "🔔" * 10 + "\n")
+            
+        #     # 1. 检查文字原材料
+        #     if input_ids is not None:
+        #         sys.stdout.write(f"📝 input_ids 形状: {input_ids.shape}\n")
+        #         # 检查你的 IMAGE_TOKEN_INDEX (-200)
+        #         img_token_id = -200 
+        #         num_img_tokens = (input_ids == img_token_id).sum().item()
+        #         sys.stdout.write(f"🎯 占位符数量 (-200): {num_img_tokens}\n")
+                
+        #         # 看看第一个样本的前 50 个 Token (通常包含系统提示词和图片占位符)
+        #         sys.stdout.write(f"🔍 序列片段: {input_ids[0, :].tolist()}\n")
+            
+        #     # 2. 检查图片原材料
+        #     if images is not None:
+        #         sys.stdout.write(f"🖼️  images 形状: {images.shape} (预期 [B, 3, H, W])\n")
+        #     else:
+        #         sys.stdout.write("⚠️  警告：images 是空的 (None)！视觉特征丢失！\n")
+            
+        #     # 3. 检查标签 (微调的关键)
+        #     if labels is not None:
+        #         # 统计非 -100 的数量，即真正参与计算 Loss 的文字数量
+        #         valid_labels = (labels != -100).sum().item()
+        #         sys.stdout.write(f"🏷️  有效 Label 数量: {valid_labels}\n")
+                
+        #     sys.stdout.write("-" * 50 + "\n")
+        #     sys.stdout.flush()
+        # # 1. 预处理
         if inputs_embeds is None:
             (
                 input_ids,
@@ -75,7 +105,7 @@ class BunnyPhiForCausalLM(PhiForCausalLM, BunnyMetaForCausalLM, GenerationMixin)
             )
 
         # ... (你关于 KV Cache 的处理逻辑保持不变) ...
-            # --- 🚀 终极手动修复逻辑 ---
+        # --- 🚀 终极手动修复逻辑 ---
         # 如果存在 KV Cache (past_key_values)，我们需要确保 Mask 的长度是 [当前输入 + 历史缓存]
         if past_key_values is not None and inputs_embeds is not None:
             # 获取已经缓存的 Token 数量
@@ -152,7 +182,31 @@ class BunnyPhiForCausalLM(PhiForCausalLM, BunnyMetaForCausalLM, GenerationMixin)
         self, input_ids, past_key_values=None, inputs_embeds=None, attention_mask=None, **kwargs
     ):
         images = kwargs.pop("images", None)
+        if past_key_values is None:
+            print("\n" + "="*50)
+            print("🚀 [调度中心] 进入 Prefill (初始读图) 阶段")
 
+            # 1. 检查输入 ID (Tokenizer 的产物)
+            print(f"📝 原始 input_ids: {input_ids[0].tolist()}")
+
+            # 2. 检查特殊的图像占位符 (-200) 是否存在
+            image_token_index = -200 # 对应你代码里的 IMAGE_TOKEN_INDEX
+            has_image_token = (input_ids == image_token_index).any()
+            print(f"🎯 是否检测到图片占位符 (-200): {has_image_token}")
+
+            # 3. 统计占位符数量（如果是多图会大于 1）
+            num_images = (input_ids == image_token_index).sum().item()
+            print(f"📊 样本中占位符数量: {num_images}")
+
+            # 4. 打印对应的文字片段（反向分词，看 Tokenizer 有没有乱分）
+            # 注意：这里需要你环境中能访问到 tokenizer，如果访问不到可以注释掉
+            if hasattr(self, 'tokenizer'):
+                decoded_text = self.tokenizer.decode(input_ids[0])
+                print(f"📖 还原后的提示词: {decoded_text}")
+            print(f"🖼️  传入的图像张量形状: {images.shape if images is not None else 'None'}")
+            print("="*50 + "\n")
+        else:
+            pass
         # --- 🔥 终极修复：完美模拟旧版 Cache 接口 ---
         if past_key_values is not None:
             # 1. 模拟 seen_tokens

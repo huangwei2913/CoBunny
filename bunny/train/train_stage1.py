@@ -34,10 +34,7 @@ def train():
     # 自动推断计算精度 (FP16/BF16/FP32)
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
-
-
     # ==========================================
-  
     # =========================================================
     # 3. Tokenizer 初始化 (完整保留原逻辑，处理特殊Token)
     # =========================================================
@@ -64,6 +61,7 @@ def train():
         raise ValueError(f"Unknown Model Type {model_args.model_type}")
 
     model.config.unfreeze_mm_vision_tower = model_args.unfreeze_mm_vision_tower
+    model.config.training_stage = "pretrain"  # 确保传给 config
     NEW_TOKENS = ["<img_content>", "<pad>"]
     tokenizer.add_tokens(NEW_TOKENS, special_tokens=True)
     model.resize_token_embeddings(len(tokenizer))

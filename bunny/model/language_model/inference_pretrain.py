@@ -24,8 +24,11 @@ def get_inference_prompt(question):
     prompt = conv.get_prompt()
     return prompt
 # 配置
-MODEL_PATH = '/mnt/CoBunny/checkpoints-stage3/bunny-phi1.5-full-finetune-final-fp16'
-IMAGE_PATH = "/mnt/CoBunny/bunny/model/language_model/Test.jpg"
+#MODEL_PATH = '/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_modified/checkpoint-31216'
+MODEL_PATH = '/mnt/CoBunny/checkpoints-stage3/bunny-phi1.5-full-finetune-2000-fp16'
+
+
+IMAGE_PATH = "/mnt/CoBunny/bunny/model/language_model/xx.jpg"
 DEVICE = "cuda:0"
 IMAGE_TOKEN_INDEX = -200 
 TARGET_ID = -200  # 锁死的逻辑 ID
@@ -106,6 +109,7 @@ def tokenizer_image_token_custom(prompt, tokenizer, image_token_index=IMAGE_TOKE
         input_ids.extend(x[offset:])
 
     return torch.tensor(input_ids, dtype=torch.long).unsqueeze(0).to("cuda:0")
+
 
 
 def get_six_crops(image_path, processor):
@@ -279,23 +283,32 @@ def run_inference():
         output_ids = model.generate(
             input_ids,
             images=image_tensor,
-            attention_mask=attention_mask, # 传入补全的 mask
             do_sample=False,
-            max_new_tokens=256,
-            use_cache=True,
-            pad_token_id=pad_token_id, # 使用训练时设定的新 Pad ID
+            max_new_tokens=64, # 先看短描述
+            # 必须传 mask，防止 pad/eos 混淆
+            attention_mask=attention_mask,
             eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.eos_token_id,
+            use_cache=False
         )
 
+
     # 6. 结果解码
-    response = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+# 6. 结果解码 (修正版：过滤掉非文字 ID)
+    # 重点：output_ids[0] 是个 Tensor，得先转成 list，然后把 -200 这种东西踢出去
+    clean_output_ids = [idx for idx in output_ids[0].tolist() if idx >= 0]
+    
+    # 现在解码就绝对不会报 TypeError 了
+    response = tokenizer.decode(clean_output_ids, skip_special_tokens=True)
+    
     print(f"\n📄 模型输出全文:\n{response}")
 
     if "ASSISTANT:" in response:
         answer = response.split("ASSISTANT:")[-1].strip()
         print(f"\n✅ 最终 AI 回答:\n{answer}")
     else:
-        print("\n⚠️ 警告：模型未生成 ASSISTANT 标志，可能因为 Prompt 截断或 EOS 逻辑异常。")
+        # Stage 1 没生成标志很正常，我们直接看 response 就行
+        print("\n⚠️ 提示：模型处于预训练阶段，可能直接在续写描述而没有输出标志。")
 
 
 if __name__ == "__main__":

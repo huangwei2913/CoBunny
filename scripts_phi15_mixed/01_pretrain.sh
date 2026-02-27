@@ -18,10 +18,10 @@ INCLUDE_STR="192.168.0.3:0,1,2,3,4,5,6,7"
 # 2. 模型与架构参数
 # ========================================================
 MODEL_TYPE="phi-1.5"
-BASE_MODEL="/mnt/conda_data/checkpoints-pretrain/checkpoint-18000"
+BASE_MODEL="/mnt/conda_data/microsoft/phi-1_5"
 # 关键：这里传你代码中定义的逻辑开关名称
 VISION_TOWER="mixedencoder" 
-OUTPUT_DIR="/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_continued"
+OUTPUT_DIR="/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_modified"
 mkdir -p $OUTPUT_DIR
 # 1. 基础环境
 export PYTHONUNBUFFERED=1

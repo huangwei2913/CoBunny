@@ -241,7 +241,7 @@ class SimpleMlp(nn.Module):
 
 
 #也就说我们可以在这里强制让视觉编码器，直接输出IdentityMap，特征向量
-def build_vision_projector(config, delay_load=False, **kwargs):
+def build_vision_projector(config, **kwargs):
     projector_type = getattr(config, 'mm_projector_type', 'mlp2x_gelu')
 
     if projector_type == 'linear':
