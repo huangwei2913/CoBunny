@@ -5,6 +5,7 @@ from bunny.model.language_model.bunny_phi import BunnyPhiForCausalLM
 from PIL import Image
 from bunny import conversation as conversation_lib
 from bunny.constants import DEFAULT_IMAGE_TOKEN
+from PIL import Image, ImageOps  # 必须引入 ImageOps 用于 pad 操作
 def get_inference_prompt(question):
     # 1. 强制获取 bunny 模版 (对应 --version bunny)
     conv = conversation_lib.conv_templates["bunny"].copy()
@@ -22,10 +23,10 @@ def get_inference_prompt(question):
     return prompt
 # 配置
 #MODEL_PATH = '/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_modified/checkpoint-31216'
-MODEL_PATH = '/mnt/CoBunny/checkpoints-stage3/bunny-phi1.5-full-finetune-2000-fp16'
+MODEL_PATH = '/mnt/CoBunny/checkpoints-stage3/fasionmodel'
 
 
-IMAGE_PATH = "/mnt/CoBunny/bunny/model/language_model/Test.jpg"
+IMAGE_PATH = "/mnt/CoBunny/bunny/model/language_model/shouye.jpg"
 DEVICE = "cuda:0"
 IMAGE_TOKEN_INDEX = -200 
 TARGET_ID = -200  # 锁死的逻辑 ID
@@ -62,42 +63,82 @@ def tokenizer_image_token_custom(prompt, tokenizer, image_token_index=IMAGE_TOKE
 
 
 def get_six_crops(image_path, processor):
-    """6图切分 - 训练时形状对齐"""
+    """
+    6图切分 - 完全对齐训练时的 V17 乐高切片逻辑
+    """
     raw_image = Image.open(image_path).convert('RGB')
-    w, h = raw_image.size
-    def calculate_anchors(full_len, target_len):
-        if full_len <= target_len: return [0, 0, 0, 0, 0]
-        max_scroll = full_len - target_len
-        return [0, max_scroll // 4, max_scroll // 2, 3 * max_scroll // 4, max_scroll]
-    
     target_sz = 378
-    global_img = raw_image.resize((target_sz, target_sz), Image.BILINEAR)
-    x_coords = calculate_anchors(w, target_sz)
-    y_coords = calculate_anchors(h, target_sz)
-    crops = [
-        raw_image.crop((x_coords[0], y_coords[0], x_coords[0] + target_sz, y_coords[0] + target_sz)),
-        raw_image.crop((x_coords[4], y_coords[0], x_coords[4] + target_sz, y_coords[0] + target_sz)),
-        raw_image.crop((x_coords[0], y_coords[4], x_coords[0] + target_sz, y_coords[4] + target_sz)),
-        raw_image.crop((x_coords[4], y_coords[4], x_coords[4] + target_sz, y_coords[4] + target_sz)),
-        raw_image.crop((x_coords[2], y_coords[2], x_coords[2] + target_sz, y_coords[2] + target_sz)),
-    ]
+    canvas_sz = 714
+    
+    # ==========================================
+    # 1. 全局图逻辑 (与训练严格一致)
+    # ==========================================
+    global_img = ImageOps.pad(raw_image, (target_sz, target_sz), color=(122, 122, 122))
+
+    # ==========================================
+    # 2. 局部切片逻辑 (等同于训练的 get_v17_lego_crops)
+    # ==========================================
+    w, h = raw_image.size
+    aspect_ratio = h / w if w > 0 else 1
+
+    # --- 情况 1：极细长图 (手机截图类) ---
+    if aspect_ratio > 1.6 or aspect_ratio < 0.6:
+        main_dim = h if aspect_ratio > 1.6 else w
+        cross_dim = w if aspect_ratio > 1.6 else h
+        
+        # 宽度/高度对齐到 target_sz
+        scale = target_sz / cross_dim
+        new_main = int(main_dim * scale)
+        
+        if aspect_ratio > 1.6:
+            resized = raw_image.resize((target_sz, new_main), Image.Resampling.LANCZOS)
+        else:
+            resized = raw_image.resize((new_main, target_sz), Image.Resampling.LANCZOS)
+            
+        crops = []
+        step = (new_main - target_sz) / 4 if new_main > target_sz else 0
+        for i in range(5):
+            s = int(i * step)
+            if aspect_ratio > 1.6:
+                crops.append(resized.crop((0, s, target_sz, s + target_sz)))
+            else:
+                crops.append(resized.crop((s, 0, s + target_sz, target_sz)))
+
+    # --- 情况 2：标准比例 (十字咬合类) ---
+    else:
+        scale = canvas_sz / max(w, h)
+        curr_w, curr_h = int(w * scale), int(h * scale)
+        resized_714 = raw_image.resize((curr_w, curr_h), Image.Resampling.LANCZOS)
+
+        def get_coords(cur, tgt):
+            return (0, 0) if cur <= tgt else (0, cur - tgt)
+
+        x_low, x_high = get_coords(curr_w, target_sz)
+        y_low, y_high = get_coords(curr_h, target_sz)
+        x_mid, y_mid = (curr_w - target_sz) // 2, (curr_h - target_sz) // 2
+
+        coords = [(x_low, y_low), (x_high, y_low), (x_low, y_high), (x_high, y_high), (x_mid, y_mid)]
+        
+        crops = []
+        for lx, ly in coords:
+            crop = resized_714.crop((lx, ly, lx + target_sz, ly + target_sz))
+            if crop.size != (target_sz, target_sz):
+                # 最后的补白防线
+                pad = Image.new('RGB', (target_sz, target_sz), (122, 122, 122))
+                pad.paste(crop, (0, 0))
+                crop = pad
+            crops.append(crop)
+
+    # ==========================================
+    # 3. 拼接并送入 Processor
+    # ==========================================
     six_images = [global_img] + crops
     pixel_values = processor.preprocess(six_images, return_tensors='pt')['pixel_values']
     
     if pixel_values.dim() == 5:
         pixel_values = pixel_values.unsqueeze(0)
+        
     return pixel_values.to(DEVICE, dtype=torch.float16)
-
-
-
-def get_processed_images(image_path, processor):
-    # 按照 Bunny 的标准切分逻辑加载图片
-    raw_image = Image.open(image_path).convert('RGB')
-    target_sz = 378
-    # 简化示例：仅返回 global_img。如需 6 图切分，请复用你之前的 get_six_crops 函数
-    pixel_values = processor.preprocess(raw_image, return_tensors='pt')['pixel_values']
-    return pixel_values.to(DEVICE, dtype=torch.float16)
-
 
 
 
@@ -141,7 +182,7 @@ def run_inference():
     image_tensor = image_tensor.to(DEVICE, dtype=torch.float16)
 
     # 构造 Prompt (对齐训练时的 <img_content>)
-    question = "What is in the image? Describe it clearly."
+    question = "What is in the image?Please describe it shortly.If possible, please describe the background environment in detail and all objects should be described"
     prompt = get_inference_prompt(question)
     
     input_ids = tokenizer_image_token_custom(prompt, tokenizer, IMAGE_TOKEN_INDEX).to(DEVICE)
@@ -174,8 +215,21 @@ def run_inference():
             use_cache=False
         )
 
-    
-
+    ###########下面这个是我测试过的，指令跟随还不是很好
+    # with torch.inference_mode():
+    #     output_ids = model.generate(
+    #         input_ids,
+    #         images=image_tensor,
+    #         do_sample=False,              # 彻底关闭随机采样，消除索引越界风险
+    #         max_new_tokens=512,
+    #         attention_mask=attention_mask,
+    #         eos_token_id=tokenizer.eos_token_id,
+    #         pad_token_id=tokenizer.eos_token_id, # 确保与 tokenizer 一致
+    #         use_cache=True,               # 开启缓存可以加速生成并减少显存碎片
+    #         # 如果依然想防止重复，只保留 penalty 且设为 1.0 (即不生效)
+    #         # 待 FashionRec 微调解决根本问题后再调高
+    #         repetition_penalty=1.0        
+    #     )
     clean_output_ids = [idx for idx in output_ids[0].tolist() if idx >= 0]
     
     # 现在解码就绝对不会报 TypeError 了

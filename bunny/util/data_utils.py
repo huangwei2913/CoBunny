@@ -7,8 +7,7 @@ from typing import Dict, Sequence, Optional, List
 import torch
 import transformers
 from torch.utils.data import Dataset
-from PIL import Image
-
+from PIL import Image, ImageOps
 # 引入我们定义好的常量
 from bunny.constants import IGNORE_INDEX, DEFAULT_IMAGE_TOKEN
 from bunny import conversation as conversation_lib
@@ -179,6 +178,68 @@ def preprocess(
     targets = targets.view(-1)
 
     return dict(input_ids=input_ids, labels=targets)
+
+
+#获取乐高图的切片
+def get_v17_lego_crops(raw_image, target_sz=378, canvas_sz=714):
+    """
+    统一的 V17 乐高切片逻辑：自动适配任何比例
+    """
+    w, h = raw_image.size
+    aspect_ratio = h / w if w > 0 else 1
+
+    # --- 情况 1：极细长图 (手机截图类) ---
+    if aspect_ratio > 1.6 or aspect_ratio < 0.6:
+        # 这种情况下，我们沿长边进行 1x5 的线性排布
+        main_dim = h if aspect_ratio > 1.6 else w
+        cross_dim = w if aspect_ratio > 1.6 else h
+        
+        # 宽度/高度对齐到 target_sz
+        scale = target_sz / cross_dim
+        new_main = int(main_dim * scale)
+        
+        if aspect_ratio > 1.6:
+            resized = raw_image.resize((target_sz, new_main), Image.Resampling.LANCZOS)
+        else:
+            resized = raw_image.resize((new_main, target_sz), Image.Resampling.LANCZOS)
+            
+        crops = []
+        step = (new_main - target_sz) / 4 if new_main > target_sz else 0
+        for i in range(5):
+            s = int(i * step)
+            if aspect_ratio > 1.6:
+                crops.append(resized.crop((0, s, target_sz, s + target_sz)))
+            else:
+                crops.append(resized.crop((s, 0, s + target_sz, target_sz)))
+        return crops
+
+    # --- 情况 2：标准比例 (十字咬合类) ---
+    else:
+        # 也就是你最认可的 V17 四角+中心模式
+        scale = canvas_sz / max(w, h)
+        curr_w, curr_h = int(w * scale), int(h * scale)
+        resized_714 = raw_image.resize((curr_w, curr_h), Image.Resampling.LANCZOS)
+
+        def get_coords(cur, tgt):
+            return (0, 0) if cur <= tgt else (0, cur - tgt)
+
+        x_low, x_high = get_coords(curr_w, target_sz)
+        y_low, y_high = get_coords(curr_h, target_sz)
+        x_mid, y_mid = (curr_w - target_sz) // 2, (curr_h - target_sz) // 2
+
+        coords = [(x_low, y_low), (x_high, y_low), (x_low, y_high), (x_high, y_high), (x_mid, y_mid)]
+        
+        crops = []
+        for lx, ly in coords:
+            crop = resized_714.crop((lx, ly, lx + target_sz, ly + target_sz))
+            if crop.size != (target_sz, target_sz):
+                # 最后的补白防线
+                pad = Image.new('RGB', (target_sz, target_sz), (122, 122, 122))
+                pad.paste(crop, (0, 0))
+                crop = pad
+            crops.append(crop)
+        return crops
+
 
 
 Image.MAX_IMAGE_PIXELS = None 
@@ -359,19 +420,8 @@ class LazySupervisedDataset(Dataset):
 
             try:
                 raw_image = Image.open(img_path).convert('RGB')
-                w, h = raw_image.size
-                global_img = raw_image.resize((target_sz, target_sz), Image.BILINEAR)
-                x_coords = calculate_anchors(w, target_sz)
-                y_coords = calculate_anchors(h, target_sz)
-                
-                crops = [
-                    raw_image.crop((x_coords[0], y_coords[0], x_coords[0] + target_sz, y_coords[0] + target_sz)),
-                    raw_image.crop((x_coords[4], y_coords[0], x_coords[4] + target_sz, y_coords[0] + target_sz)),
-                    raw_image.crop((x_coords[0], y_coords[4], x_coords[0] + target_sz, y_coords[4] + target_sz)),
-                    raw_image.crop((x_coords[4], y_coords[4], x_coords[4] + target_sz, y_coords[4] + target_sz)),
-                    raw_image.crop((x_coords[2], y_coords[2], x_coords[2] + target_sz, y_coords[2] + target_sz)),
-                ]
-                
+                global_img = ImageOps.pad(raw_image, (target_sz, target_sz), color=(122, 122, 122))
+                crops = get_v17_lego_crops(raw_image, target_sz=378)
                 six_images = [global_img] + crops
                 sub_image_dict = processor.preprocess(six_images, return_tensors='pt')
                 # 统一 Key 为 'image' (单数)，与 Collator 逻辑对齐

@@ -35,7 +35,7 @@
       "device": "cpu",
       "pin_memory": true
     },
-    "overlap_comm": true,
+    "overlap_comm": false,
     "contiguous_gradients": true,
     "sub_group_size": 1e8,
     "reduce_bucket_size": "auto",
