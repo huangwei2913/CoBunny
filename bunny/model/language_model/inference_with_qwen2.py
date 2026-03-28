@@ -1,11 +1,10 @@
 import torch
 import os
 from transformers import AutoTokenizer, AutoConfig
-from bunny.model.language_model.bunny_phi import BunnyPhiForCausalLM
-from PIL import Image
+from bunny.model.language_model.bunny_qwen import BunnyQwen2ForCausalLM
+from PIL import Image, ImageOps  # 必须引入 ImageOps 用于 pad 操作
 from bunny import conversation as conversation_lib
 from bunny.constants import DEFAULT_IMAGE_TOKEN
-from PIL import Image, ImageOps  # 必须引入 ImageOps 用于 pad 操作
 def get_inference_prompt(question):
     # 1. 强制获取 bunny 模版 (对应 --version bunny)
     conv = conversation_lib.conv_templates["bunny"].copy()
@@ -23,10 +22,9 @@ def get_inference_prompt(question):
     return prompt
 # 配置
 #MODEL_PATH = '/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_modified/checkpoint-31216'
-MODEL_PATH = '/mnt/CoBunny/checkpoints-stage3/bunny-phi1.5-full-finetune-final-fp16'
-
-
-IMAGE_PATH = "/mnt/CoBunny/bunny/model/language_model/xx.jpg"
+MODEL_PATH = '/mnt/conda_data/checkpoints-finetuned/bunny-qwen2_finally'
+IMAGE_PATH = "/mnt/CoBunny/bunny/model/language_model/cloth.jpg"
+MYQUESTION = "Describe the image clearly."
 DEVICE = "cuda:0"
 IMAGE_TOKEN_INDEX = -200 
 TARGET_ID = -200  # 锁死的逻辑 ID
@@ -59,6 +57,8 @@ def tokenizer_image_token_custom(prompt, tokenizer, image_token_index=IMAGE_TOKE
         input_ids.extend(x[offset:])
 
     return torch.tensor(input_ids, dtype=torch.long).unsqueeze(0).to("cuda:0")
+
+
 
 
 
@@ -143,6 +143,18 @@ def get_six_crops(image_path, processor):
 
 
 
+def get_processed_images(image_path, processor):
+    # 按照 Bunny 的标准切分逻辑加载图片
+    raw_image = Image.open(image_path).convert('RGB')
+    target_sz = 378
+    # 简化示例：仅返回 global_img。如需 6 图切分，请复用你之前的 get_six_crops 函数
+    pixel_values = processor.preprocess(raw_image, return_tensors='pt')['pixel_values']
+    return pixel_values.to(DEVICE, dtype=torch.float16)
+
+
+
+
+
 def run_inference():
     print(f"🚀 [1/5] 正在通过“手动灌顶法”加载模型...")
     
@@ -151,7 +163,7 @@ def run_inference():
     
     # 2. 核心：在 CPU 上初始化一个“实心”模型（不使用 from_pretrained）
     # 这样可以确保参数不是 Meta Tensor，而是真正的 CPU 内存
-    model = BunnyPhiForCausalLM(config)
+    model = BunnyQwen2ForCausalLM(config)
     
     # 3. 手动载入那 4GB 的真材实料
     bin_path = os.path.join(MODEL_PATH, "pytorch_model.bin")
@@ -182,7 +194,7 @@ def run_inference():
     image_tensor = image_tensor.to(DEVICE, dtype=torch.float16)
 
     # 构造 Prompt (对齐训练时的 <img_content>)
-    question = "What is in the image?Please describe it shortly.If possible, please describe the background environment in detail and all objects should be described"
+    question = MYQUESTION
     prompt = get_inference_prompt(question)
     
     input_ids = tokenizer_image_token_custom(prompt, tokenizer, IMAGE_TOKEN_INDEX).to(DEVICE)
@@ -207,7 +219,7 @@ def run_inference():
             input_ids,
             images=image_tensor,
             do_sample=False,
-            max_new_tokens=512, # 先看短描述
+            max_new_tokens=256, # 先看短描述
             # 必须传 mask，防止 pad/eos 混淆
             attention_mask=attention_mask,
             eos_token_id=tokenizer.eos_token_id,
@@ -215,21 +227,8 @@ def run_inference():
             use_cache=False
         )
 
-    ###########下面这个是我测试过的，指令跟随还不是很好
-    # with torch.inference_mode():
-    #     output_ids = model.generate(
-    #         input_ids,
-    #         images=image_tensor,
-    #         do_sample=False,              # 彻底关闭随机采样，消除索引越界风险
-    #         max_new_tokens=512,
-    #         attention_mask=attention_mask,
-    #         eos_token_id=tokenizer.eos_token_id,
-    #         pad_token_id=tokenizer.eos_token_id, # 确保与 tokenizer 一致
-    #         use_cache=True,               # 开启缓存可以加速生成并减少显存碎片
-    #         # 如果依然想防止重复，只保留 penalty 且设为 1.0 (即不生效)
-    #         # 待 FashionRec 微调解决根本问题后再调高
-    #         repetition_penalty=1.0        
-    #     )
+    
+
     clean_output_ids = [idx for idx in output_ids[0].tolist() if idx >= 0]
     
     # 现在解码就绝对不会报 TypeError 了

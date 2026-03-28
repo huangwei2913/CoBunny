@@ -7,9 +7,10 @@ bunny
 checkpoints-finetune
 checkpoints-pretrain
 checkpoints-stage3
+dataassert
+dataengine
 dinov3
 eval
 mmeanswers
 script
 tmpo2ivf29_
-torchinductor_huangwei

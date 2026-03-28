@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModelForCausalLM
-
+from transformers.generation import GenerationMixin # 必须导入这个
 from .llama import LlamaModel, LlamaConfig, LlamaForCausalLM
 
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -22,7 +22,7 @@ class BunnyLlamaModel(BunnyMetaModel, LlamaModel):
         super(BunnyLlamaModel, self).__init__(config)
 
 
-class BunnyLlamaForCausalLM(LlamaForCausalLM, BunnyMetaForCausalLM):
+class BunnyLlamaForCausalLM(LlamaForCausalLM, BunnyMetaForCausalLM, GenerationMixin):
     config_class = BunnyLlamaConfig
 
     def __init__(self, config):
