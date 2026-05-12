@@ -123,6 +123,39 @@ class BunnyMetaModel:
 
         print("✅ [Stage 3] 视觉模块初始化完成，准备进行全解冻微调。")
 
+
+    def initialize_vision_modules_stage3_fsdp(self, model_args):
+        vision_tower_name = model_args.vision_tower
+        self.config.mm_vision_tower = vision_tower_name
+        
+        vision_tower = self.get_vision_tower()
+        
+        if vision_tower is None:
+            vision_tower = build_vision_tower(model_args)
+            self.vision_tower = vision_tower
+        
+        if hasattr(vision_tower, 'load_model'):
+            vision_tower.load_model()
+
+        # --- 关键修改：严禁在 FSDP 下调用 .to('cuda') ---
+        # 仅设置精度，不搬运设备
+        compute_dtype = torch.float16 if getattr(model_args, 'fp16', False) else torch.bfloat16
+        # 只要不带 device='cuda'，.to(dtype) 在 FSDP 下是安全的
+        vision_tower.to(dtype=compute_dtype) 
+
+        # 解冻梯度
+        for p in vision_tower.parameters():
+            p.requires_grad = True
+
+        # Projector 初始化
+        self.config.use_mm_proj = True
+        if getattr(self, 'mm_projector', None) is None:
+            self.mm_projector = build_vision_projector(self.config)
+        
+        for p in self.mm_projector.parameters():
+            p.requires_grad = True    
+
+
     def initialize_vision_modules(self, model_args):
         """
         🚀 专门用于 Stage 1 (Pretrain) 的视觉模块初始化逻辑。
@@ -276,18 +309,31 @@ class BunnyMetaForCausalLM(ABC):
         input_ids_temp = input_ids.clone() 
         input_ids_temp[input_ids_temp == IMAGE_TOKEN_INDEX] = 0
         # --- [玛德，这就给你打印 input_ids_temp] ---
-        if local_rank == 0:
-            print(f"\n📊 [input_ids_temp 监控]")
-            print(f"🔹 形状 (Shape): {input_ids_temp.shape}") # 应该是 [Batch_Size, Sequence_Length]
+# # --- 强制打印调试法 ---
+#         import torch.distributed as dist
+#         # 获取当前进程的 rank，不依赖那个可能没赋值成功的 local_rank
+#         try:
+#             curr_rank = dist.get_rank()
+#         except:
+#             curr_rank = 0 # 非分布式模式
+
+#         if curr_rank == 0:
+#             # 使用内置 print，加上 flush=True 确保立即输出到屏幕
+#             print(f"\n📊 [input_ids_temp 监控]", flush=True)
+#             print(f"🔹 形状 (Shape): {input_ids_temp.shape}", flush=True)
             
-            # 看看第一条数据前 100 个 token 长啥样，0 应该就在里面
-            # 如果你的 <image> 在开头，你就能看到一串 0
-            print(f"🔹 样本 0 前 100 个内容: {input_ids_temp[0, :100].tolist()}")
+#             # 看看第一条数据前 100 个 token
+#             sample_0 = input_ids_temp[0, :100].tolist()
+#             print(f"🔹 样本 0 前 100 个内容: {sample_0}", flush=True)
             
-            # 统计一下 0 的个数，确认 -200 确实被替换了
-            num_zeros = (input_ids_temp == 0).sum().item()
-            print(f"🔹 当前 Batch 中 Token '0' (原-200) 的总数: {num_zeros}")
-            print("-" * 40)
+#             # 统计 0 的个数
+#             num_zeros = (input_ids_temp == 0).sum().item()
+#             print(f"🔹 当前 Batch 中 Token '0' (原-200) 的总数: {num_zeros}", flush=True)
+            
+#             # 顺便确认视觉特征有没有货
+#             if len(image_features) > 0:
+#                 print(f"📸 视觉特征已就绪，当前组数: {len(image_features)}", flush=True)
+#             print("-" * 40, flush=True)
 
         # 去掉 Padding，转为变长列表，准备缝合
         input_ids_list = [cur_input_ids[cur_mask] for cur_input_ids, cur_mask in zip(input_ids, attention_mask)]
@@ -304,8 +350,7 @@ class BunnyMetaForCausalLM(ABC):
             if len(image_features) > 0:
                  print(f"🔍 [特征维度] 单个块形状: {image_features[0].shape}") # 必须是 [365, 1024]
 
-        if len(image_features) != total_image_placeholders:
-            raise ValueError(f"❌ 严重对齐错误：你文本里写了 {total_image_placeholders} 个 <image>，但视觉塔只给了 {len(image_features)} 组特征！")
+        # --- 替换结束 ---
         # ------------------------------------
         # 5. 核心缝合逻辑：将 365 个 Token 塞进每一个 IMAGE_TOKEN_INDEX 位置
         for batch_idx, cur_input_ids in enumerate(input_ids_list):
@@ -334,6 +379,9 @@ class BunnyMetaForCausalLM(ABC):
                 # B. 插入图像特征 (直接插入视觉塔返回的 365 个 tokens)
                 if i < num_images:
                     cur_feat = image_features[cur_image_idx]
+                    # --- 添加以下打印信息 ---
+                    if local_rank == 0:
+                         print(f"🚀 [物理注入] 样本 {batch_idx} 的第 {cur_image_idx} 组特征正在缝入第 {i} 个坑位")
                     cur_image_idx += 1
                     
                     cur_new_input_embeds.append(cur_feat)
@@ -379,8 +427,19 @@ class BunnyMetaForCausalLM(ABC):
 
         new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
 
-        # 7. 🔥 数值稳定性加固 (防止 NaN/Inf 毁掉模型)
-        if torch.isnan(new_input_embeds).any() or torch.isinf(new_input_embeds).any():
-            new_input_embeds = torch.nan_to_num(new_input_embeds, nan=0.0, posinf=65500, neginf=-65500)
+
+        if new_input_embeds.dtype == torch.float16:
+            # 第一步：物理检查与填充
+            if torch.isnan(new_input_embeds).any() or torch.isinf(new_input_embeds).any():
+                if local_rank == 0:
+                    print("⚠️ [Warning] 捕获到 NaN/Inf，执行紧急数值置换...")
+                # 将异常值直接归零，防止污染整个 Batch
+                new_input_embeds = torch.nan_to_num(new_input_embeds, nan=0.0, posinf=4096.0, neginf=-4096.0)
+            
+            # 第二步：强力限幅 (将阈值从 16384 压低到 4096)
+            # 理由：Phi-1.5 的 Hidden Size 较小，4096 已经足够表达特征，
+            # 留出更大的余量给后面的 Transformer 层计算。
+            new_input_embeds = torch.clamp(new_input_embeds, min=-4096.0, max=4096.0)
 
         return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels_padded
+

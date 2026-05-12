@@ -23,10 +23,10 @@ def get_inference_prompt(question):
     return prompt
 # 配置
 #MODEL_PATH = '/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_modified/checkpoint-31216'
-MODEL_PATH = '/mnt/CoBunny/checkpoints-stage3/bunny-phi1.5-full-finetune-final-fp16'
+MODEL_PATH = '/mnt/CoBunny/checkpoints-stage3/fasionmodel'
 
 
-IMAGE_PATH = "/mnt/CoBunny/bunny/model/language_model/xx.jpg"
+IMAGE_PATH = "/mnt/CoBunny/bunny/model/language_model/shouye.jpg"
 DEVICE = "cuda:0"
 IMAGE_TOKEN_INDEX = -200 
 TARGET_ID = -200  # 锁死的逻辑 ID

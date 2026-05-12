@@ -5,6 +5,7 @@ from bunny.model.language_model.bunny_qwen import BunnyQwen2ForCausalLM
 from PIL import Image, ImageOps  # 必须引入 ImageOps 用于 pad 操作
 from bunny import conversation as conversation_lib
 from bunny.constants import DEFAULT_IMAGE_TOKEN
+
 def get_inference_prompt(question):
     # 1. 强制获取 bunny 模版 (对应 --version bunny)
     conv = conversation_lib.conv_templates["bunny"].copy()
@@ -22,8 +23,10 @@ def get_inference_prompt(question):
     return prompt
 # 配置
 #MODEL_PATH = '/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_modified/checkpoint-31216'
-MODEL_PATH = '/mnt/conda_data/checkpoints-finetuned/bunny-qwen2_finally'
-IMAGE_PATH = "/mnt/CoBunny/bunny/model/language_model/cloth.jpg"
+#MODEL_PATH = '/mnt/conda_data/checkpoints-finetuned/bunny-qwen2_finally'
+MODEL_PATH = '/mnt/conda_data/checkpoints-finetuned/bunny-qwen2_test_ocr'
+
+IMAGE_PATH = "/mnt/CoBunny/bunny/model/language_model/gupiao.jpg"
 MYQUESTION = "Describe the image clearly."
 DEVICE = "cuda:0"
 IMAGE_TOKEN_INDEX = -200 
@@ -214,6 +217,45 @@ def run_inference():
     print(f"🚀 [设备检查] Input IDs Device: {input_ids.device}")
     attention_mask = torch.ones_like(input_ids).to(DEVICE)
     
+        # 1. 扫描一级子模块名称
+    # 在 run_inference 函数中，model.to(DEVICE) 之后插入：
+
+    print("\n" + "🔍" * 30)
+    print("🔬 [V365 架构深度审计]：全量模型层扫描开始")
+    print("🔍" * 30)
+
+    raw_model = model.module if hasattr(model, "module") else model
+    
+    # 1. 打印一级模块列表
+    print(f"\n📦 一级模块列表: {list(raw_model.named_children())}")
+    print("-" * 50)
+
+    # 2. 全量遍历并分类存取
+    all_params = list(raw_model.named_parameters())
+    
+    print(f"📜 [全量参数明细] (共计 {len(all_params)} 个 Tensor):")
+    for name, param in all_params:
+        # 格式化输出：层名左对齐占 60 位，后面接形状
+        print(f"📍 {name:<60} | 形状: {list(param.shape)}")
+
+    print("-" * 50)
+
+    # 3. 专家级快速定位（为了您的非对称解冻策略）
+    projector_layers = [n for n, _ in all_params if "projector" in n.lower() or "adapter" in n.lower()]
+    vision_layers = [n for n, _ in all_params if "vision_tower" in n.lower() or "visual" in n.lower()]
+    embedding_layers = [n for n, _ in all_params if "embed_tokens" in n.lower()]
+    head_layers = [n for n, _ in all_params if "lm_head" in n.lower()]
+    
+    # 获取 LLM 的总层数（通常 Qwen2-1.5B 是 24 层，索引 0-23）
+    transformer_layers = [n for n, _ in all_params if "layers." in n.lower()]
+    
+    print(f"🎯 [重点打击目标索引]:")
+    print(f"   ├─ 词嵌入层 (Embedding): {embedding_layers}")
+    print(f"   ├─ 输出头层 (LM_Head):   {head_layers}")
+    print(f"   ├─ 连接层 (Projector):   {len(projector_layers)} 条")
+
+
+
     with torch.inference_mode():
         output_ids = model.generate(
             input_ids,

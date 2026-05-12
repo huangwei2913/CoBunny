@@ -150,7 +150,8 @@ def train():
         padding_side="right",
         use_fast=True,
     )
-
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     # 3. 模型加载 (在修改词表前加载，确保权重对应)
     if model_args.model_type in ['phi-1.5', 'phi-2']:
         model = BunnyPhiForCausalLM.from_pretrained(
@@ -172,32 +173,17 @@ def train():
         raise ValueError(f"Unknown Model Type {model_args.model_type}")
 
     model.config.unfreeze_mm_vision_tower = model_args.unfreeze_mm_vision_tower
-    NEW_TOKENS = ["<img_content>", "<pad>"]
+
+    NEW_TOKENS = ["<img_content>"]
     tokenizer.add_tokens(NEW_TOKENS, special_tokens=True)
     model.resize_token_embeddings(len(tokenizer))
+
+    # 强行校准 ID，防止推理时错位
     img_content_id = tokenizer.convert_tokens_to_ids("<img_content>")
-    pad_id = tokenizer.convert_tokens_to_ids("<pad>")
-    old_img_id = tokenizer.convert_tokens_to_ids('<image>')  # 之前微调占用的 ID
-    # 设置 Pad 属性
-    tokenizer.pad_token = "<pad>"
-    model.config.pad_token_id = tokenizer.pad_token_id  # 这个在后面会被用到
-    model.config.image_token_index = tokenizer.convert_tokens_to_ids("<img_content>")
-    eos_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 128001
-  
-
-    rank0_print(f"✅ 权重搬家与词表强制对齐完成。当前词表大小: {len(tokenizer)}")
-    pad_id_in_tokenizer = tokenizer.pad_token_id
-    pad_id_by_name = tokenizer.convert_tokens_to_ids("<pad>")
-
-    rank0_print(f"🔍 [Tokenizer Check]")
-    rank0_print(f"   - <pad> token ID: {pad_id_by_name}")
-    rank0_print(f"   - tokenizer.pad_token_id: {pad_id_in_tokenizer}")
-
-    if pad_id_in_tokenizer != pad_id_by_name:
-        raise ValueError("🚨 严重错误：tokenizer.pad_token_id 与 <pad> 的实际 ID 不一致！")
-
-    rank0_print(f"   - <img_content> ID: {model.config.image_token_index}")
-
+    model.config.image_token_index = img_content_id
+    model.config.pad_token_id = tokenizer.pad_token_id
+    model.config.vocab_size = len(tokenizer)
+    data_args.image_token_index = img_content_id  #
     # 1. 【强行注入】把 model_args 的意志强加给 model.config
     # 这样即使内部代码错误地使用了 config，它也能读到 True
     print(f"💉 [Patch] 正在将 unfreeze_mm_vision_tower={model_args.unfreeze_mm_vision_tower} 注入到 model.config...")
@@ -249,6 +235,9 @@ def train():
     vision_tower = model.get_vision_tower()
     vision_tower.to(dtype=compute_dtype, device=training_args.device)
 
+    
+    # 如果您想保护视觉塔的某些原始权重，可以在此处之后再单独对视觉塔执行冻结逻辑
+    # 但建议 Stage 3 至少让 LLM 部分全开
     if model_args.unfreeze_mm_vision_tower:  #解冻
         rank0_print("🔨 [Override] 忽略之前的 Frozen 日志，正在强制执行解冻程序...")    
         # A. 解冻顶层
@@ -276,6 +265,11 @@ def train():
         vision_tower.eval()
         rank0_print("❄️ [Confirmed] 视觉塔保持冻结状态。")
 
+        # =========================================================
+    # 核心修复：释放 Llama 3 大脑 (解决回答不停止问题)
+    # =========================================================
+    rank0_print("🔨 [Action] 正在释放 Llama 3 全量底座，确保大脑参与学习逻辑终止...")
+    model.requires_grad_(True) # 这里是释放LLAMA底座，可以作为测试，到底是全量还是额外的方式可以
     model.config.use_cache = False # 在 train 脚本里强制执行
 
     if training_args.gradient_checkpointing:
@@ -419,6 +413,11 @@ def train():
             rank0_print("📎 合并 LoRA 权重中...")
             model = model.merge_and_unload()
             model.config.lora_enable = False
+
+
+        model.config.image_token_index = tokenizer.convert_tokens_to_ids("<img_content>")
+        model.config.pad_token_id = tokenizer.pad_token_id
+        model.config.vocab_size = len(tokenizer)     
 
         # 2. 关键：强制物化所有 Buffer 并标记为持久化
         # 这一步是为了防止 position_ids 等在保存时被漏掉

@@ -12,7 +12,7 @@ from bunny.model import *
 from bunny.util.data_utils import make_supervised_data_module, DataArguments
 from arguments import ModelArguments,TrainingArguments
 import re
-
+#这个是预训练bunny-phi1.5的第一个阶段
 local_rank = None
 def rank0_print(*args):
     if local_rank == 0:

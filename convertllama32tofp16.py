@@ -7,10 +7,15 @@ from transformers import AutoConfig, AutoTokenizer
 # 1. 配置路径
 # 这是包含 config.json 的目录
 model_path = "/mnt/CoBunny/checkpoints-stage3/bunny-llama-full-finetune/checkpoint-7674"
+model_path = "/mnt/CoBunny/checkpoints-stage3/bunny-llama-full-finetune_ocr/checkpoint-4924"
+model_path = "/mnt/CoBunny/checkpoints-stage3/bunny-llama-full-finetune_ocr_revised/checkpoint-2000"
+model_path = "/mnt/CoBunny/checkpoints-stage3/bunny-llama-full-finetune_ocr_revised_modified_projector/checkpoint-4304"
+
+
 # 这是 zero_to_fp32 生成的那个 7.7GB 的文件夹路径
 weights_dir = os.path.join(model_path, "pytorch_model.bin")
 # 最终输出
-output_dir = "/mnt/CoBunny/checkpoints-stage3/llama"
+output_dir = "/mnt/CoBunny/checkpoints-stage3/llama_ocr"
 
 print(" 开始物理合并权重...")
 

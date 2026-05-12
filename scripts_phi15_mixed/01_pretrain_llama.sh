@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 1. 强制逻辑隔离坏卡 (假设 7 号卡损坏)
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 # 2. 环境变量补丁 (针对 T4/云主机稳定性)
 export PYTHONUNBUFFERED=1
@@ -16,12 +16,19 @@ MODEL_TYPE="llama3-1b"
 BASE_MODEL="/mnt/conda_data/Llama-3.2-1B"
 VISION_TOWER="mixedencoder"
 OUTPUT_DIR="/mnt/conda_data/checkpoints-pretrain/pretrain_llama"
+OUTPUT_DIR="/mnt/conda_data/checkpoints-pretrain/pretrain_llama_architecutre_revised"
+OUTPUT_DIR="/mnt/conda_data/checkpoints-pretrain/pretrain_llama_architecutre_revised_dino"
+IMAGE_PATH="/"
 mkdir -p $OUTPUT_DIR
+
+
+#/mnt/conda_data/Bunny-v1.1-data/pretrain/debug_pretrain.json
+#/mnt/CoBunny/dataassert/mixed_stage1_2m_stable.json
 
 # 4. 启动 DeepSpeed (只给 7 张卡)
 # 这里的 --include 是关键，它会让进程只在 0-6 号卡上启动
 deepspeed \
-    --include localhost:0,1,2,3,4,5,6 \
+    --include localhost:0,1,2,3,4,5,6,7 \
     --master_port 29505 \
     bunny/train/train_stage1_llama.py \
     --deepspeed ./script/deepspeed/zero2_mixencoders_pretraing.json \
@@ -29,10 +36,10 @@ deepspeed \
     --model_type $MODEL_TYPE \
     --version bunny \
     --vision_tower $VISION_TOWER \
-    --vision_tower_dino /mnt/facebook/dinov3-convnext-large-pretrain-lvd1689m \
+    --vision_tower_dino /mnt/facebook/dinov3-vitb16-pretrain-lvd1689m \
     --vision_tower_siglip /mnt/siglip-so400m-patch14-384 \
-    --data_path /mnt/conda_data/Bunny-v1.1-data/pretrain/bunny_stage1_cleaned.json \
-    --image_folder /mnt/conda_data/Bunny-v1.1-data/pretrain/images \
+    --data_path  /mnt/CoBunny/dataassert/mixed_stage1_2m_stable.json  \
+    --image_folder / \
     --mm_projector_type mlp2x_gelu \
     --tune_mm_mlp_adapter True \
     --freeze_backbone True \

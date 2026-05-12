@@ -4,7 +4,6 @@ SEED-Bench
 answers_upload
 build
 bunny
-checkpoints-finetune
 checkpoints-pretrain
 checkpoints-stage3
 dataassert

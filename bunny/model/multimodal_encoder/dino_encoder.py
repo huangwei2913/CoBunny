@@ -123,11 +123,15 @@ class DinoVisionTower(BaseVisionTower):
     def _forward(self, images):
         # 确保输入精度一致
         images = images.to(device=self.device, dtype=self.dtype)
-        # 获取 4 层中间层特征 (List of Tuple: (feat, cls))
+        
+        # 获取多层中间层特征 (List of Tuple: (feat, cls))
         all_layers = self.vision_tower.get_intermediate_layers(
             images, n=self.interaction_indexes, return_class_token=True
         )
-        aligned_layers = []
+        
+        raw_patch_list = []  # 存放空间对齐后的纯 Patch 特征 [B, target_N, C]
+        cls_token_list = []  # 存放每一层提取或伪造的原始 CLS Token [B, 1, C]
+
         for layer_out in all_layers:
             if isinstance(layer_out, tuple):
                 feat, cls = layer_out
@@ -139,38 +143,62 @@ class DinoVisionTower(BaseVisionTower):
             if cls is not None:
                 cls = cls.to(images.dtype)
 
-            # 维度处理: [B, H, W, C] -> [B, T, C]
+            # --- 1. 维度处理: [B, C, H, W] -> [B, T, C] ---
+            # 如果 backbone 出来的是 4D 结构，统一展平为 1D 序列
             if feat.dim() == 4:
                 B, C, H, W = feat.shape
                 feat = feat.view(B, C, H * W).permute(0, 2, 1)
-            
-            # 空间插值对齐到 target_N (如 24x24=576)
-            if feat.shape[1] != self.target_N:
-                # [B, T, C] -> [B, C, T] -> [B, C, target_N] -> [B, target_N, C]
-                B, T, C = feat.shape
-                hw = int(math.sqrt(T)) # 算出原始的宽高，比如 24
-                target_hw = int(math.sqrt(self.target_N)) # 目标宽高，比如 24
+
+            # --- 2. 提取当前层 CLS (确保为 [B, 1, C]) ---
+            # 注意：如果原本没有 CLS，就在没插值之前，利用最真实的原始特征算一个均值作为 CLS
+            if cls is not None:
+                cls_tokens = cls.unsqueeze(1)
+            else:
+                cls_tokens = feat.mean(dim=1, keepdim=True)
+            cls_token_list.append(cls_tokens)
+
+            # --- 3. 空间插值对齐到 target_N (如 24x24=576) ---
+            B, T, C = feat.shape
+            if T != self.target_N:
+                hw = int(math.sqrt(T)) # 算出原始的宽高
+                target_hw = int(math.sqrt(self.target_N)) # 目标宽高
+                
+                # 转换回 2D 结构用于插值 [B, C, hw, hw]
                 feat = feat.view(B, hw, hw, C).permute(0, 3, 1, 2)
+                
+                # 动态选择插值模式：缩小用 area 保留笔画，放大用 bicubic 防止马赛克
+                interp_mode = "area" if hw > target_hw else "bicubic"
                 feat = F.interpolate(
                     feat, 
                     size=(target_hw, target_hw), 
-                    mode="bilinear", 
-                    align_corners=False
+                    mode=interp_mode, 
+                    align_corners=False if interp_mode == "bicubic" else None
                 )
-                feat = feat.permute(0, 2, 3, 1).view(B, -1, C).contiguous()
-
-            # 拼接 CLS Token: [B, 1, C] + [B, target_N, C] -> [B, 1+target_N, C]
-            if cls is not None:
-                cls_tokens = cls.unsqueeze(1)
-                feat_with_cls = torch.cat([cls_tokens, feat], dim=1)
-            else:
-                # 如果没有 CLS，伪造一个均值池化 CLS 保证混合编码器结构统一
-                pseudo_cls = feat.mean(dim=1, keepdim=True)
-                feat_with_cls = torch.cat([pseudo_cls, feat], dim=1)
                 
+                # 恢复为序列格式 [B, target_hw*target_hw, C] -> [B, target_N, C]
+                feat = feat.permute(0, 2, 3, 1).view(B, -1, C).contiguous()
+            
+            # 将处理好的纯 Patch 特征存入列表
+            raw_patch_list.append(feat)
+
+        # ==========================================
+        # 核心改动：DeepSeek 启发的 "全局 CLS 跨层聚合"
+        # ==========================================
+        # 此时 cls_token_list 包含了所有被选中层的 CLS
+        # 我们把它们叠在一起求平均，生成一个融合了“浅层纹理”和“深层语义”的超级 CLS
+        # 形状变化: [Layers, B, 1, C] -> mean(dim=0) -> [B, 1, C]
+        merged_cls = torch.stack(cls_token_list, dim=0).mean(dim=0)
+
+        # --- 4. 重新组装 ---
+        aligned_layers = []
+        for feat in raw_patch_list:
+            # 现在，每一层的 Patch 前面，拼接的不再是它自己的偏科 CLS，
+            # 而是这个跨越所有深度的最强全局指导信号 merged_cls
+            feat_with_cls = torch.cat([merged_cls, feat], dim=1) # [B, 1+target_N, C]
             aligned_layers.append(feat_with_cls)
 
-        # 拼接所有选定层的特征
+        # 拼接所有选定层的特征 (发往后续的 Connector)
+        # 输出形状: [B, Layers * (1 + target_N), C]
         all_intermediate_features = torch.cat(aligned_layers, dim=1)
         
         # 更新缓存的 Patch 数量 (不含 CLS)

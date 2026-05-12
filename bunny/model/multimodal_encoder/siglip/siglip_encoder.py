@@ -97,9 +97,13 @@ class SiglipVisionTower(BaseVisionTower): # 1. 改为继承 BaseVisionTower
                 align_corners=False
             )
             feat = feat.permute(0, 2, 3, 1).view(b, -1, d) 
-            
             # 伪 CLS 构造
-            pseudo_cls = feat.mean(dim=1, keepdim=True)
+            mean_feat = feat.mean(dim=1, keepdim=True)
+            max_feat = feat.max(dim=1, keepdim=True)[0]
+            energy = torch.norm(feat, dim=-1, keepdim=True) # [b, 576, 1]
+            attn_weights = F.softmax(energy, dim=1)
+            weighted_feat = torch.sum(feat * attn_weights, dim=1, keepdim=True)    
+            pseudo_cls = (mean_feat + max_feat + weighted_feat) / 3.0
             combined = torch.cat([pseudo_cls, feat], dim=1) 
             aligned_layers.append(combined)
 

@@ -1,8 +1,8 @@
 import json
 import re
 
-original_path = "/mnt/CoBunny/dataassert/v365_stage3_mcp_final_clean.json"
-fixed_path = "/mnt/CoBunny/dataassert/v365_stage3_mcp_final_clean_fixed.json"
+original_path = "/mnt/CoBunny/dataassert/ocr_5_ready.json"
+fixed_path = "/mnt/CoBunny/dataassert/ocr_5_ready_fixed_invalid.json"
 
 with open(original_path, 'r', encoding='utf-8') as f:
     data = json.load(f)

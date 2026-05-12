@@ -265,7 +265,7 @@ class BunnyTrainer(Trainer):
                 if getattr(self.args, 'lora_enable', False):
                     print("   🔗 正在执行权重合并 (Merge LoRA)...")
                     # merge_and_unload 会将线性层权重相加，返回原始结构的 Model
-                    temp_model = temp_model.merge_and_unload()
+                    #temp_model = temp_model.merge_and_unload()
                 
                 # --- 4. 执行全量物理保存 ---
                 # save_pretrained 会自动根据权重体积生成 model.safetensors 或 pytorch_model.bin
@@ -310,8 +310,8 @@ class BunnyTrainer(Trainer):
                 # -------------------------------------------------------
 
                 # 2. 物理合并 LoRA
-                temp_model = temp_model.merge_and_unload()
-                temp_model.config.lora_enable = False 
+                #temp_model = temp_model.merge_and_unload()
+                #temp_model.config.lora_enable = False 
                 
                 # 3. 执行全量保存
                 temp_model.save_pretrained(output_dir)

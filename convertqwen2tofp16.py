@@ -8,12 +8,14 @@ from transformers import AutoConfig, AutoTokenizer
 # 这是包含 config.json 的目录
 #model_path = "/mnt/conda_data/checkpoints-stage3/bunny-qwen-full-finetune_win/checkpoint-1000"
 
-model_path = "/mnt/conda_data/checkpoints-stage3/bunny-qwen-full-finetune_win/checkpoint-18554"
+#model_path = "/mnt/conda_data/checkpoints-stage3/bunny-qwen-full-finetune_win/checkpoint-18554"
+model_path = "/mnt/conda_data/checkpoints-stage3/bunny-qwen-sampler_tuned/checkpoint-3000"
+
 
 # 这是 zero_to_fp32 生成的那个 7.7GB 的文件夹路径
 weights_dir = os.path.join(model_path, "pytorch_model.bin")
 # 最终输出
-output_dir = "/mnt/conda_data/checkpoints-finetuned/bunny-qwen2_finally"
+output_dir = "/mnt/conda_data/checkpoints-finetuned/bunny-qwen2_test_ocr"
 
 print(" 开始物理合并权重...")
 

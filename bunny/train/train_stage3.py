@@ -18,7 +18,8 @@ def rank0_print(*args):
     if local_rank == 0:
         print(*args)
 
-
+#这个是微调bunny-phi1.5的第二个阶段。因为命令的原因，第一个阶段实际就是预训练，第三个阶段就是第二个阶段用
+#很多zero-cot等长序列数据微调的#第三个阶段我们希望就是sampler和投影层变化来进行微调
 def checkpoint_has_trainer_state(checkpoint_dir):
     return os.path.exists(os.path.join(checkpoint_dir, "trainer_state.json"))
 
@@ -131,13 +132,16 @@ def train():
         
         print(f">> model_args.unfreeze_mm_vision_tower: {v1} (Type: {type(v1)})")
         print(f">> model_args.unfreeze_vision_tower:    {v2} (Type: {type(v2)})")
-        
+        v4 = getattr(model_args, 'freeze_backbone', "MISSING")
+        print(f">> model_args.freeze_backbone:    {v4} (Type: {type(v4)})")
         # 检查 training_args 是否也被污染
         v3 = getattr(training_args, 'unfreeze_mm_vision_tower', "MISSING")
         print(f">> training_args.unfreeze_mm_vision_tower: {v3}")
+
+
         print("="*50 + "\n")
     # ==========================================
-  
+    model_args.freeze_backbone = False
     # =========================================================
     # 3. Tokenizer 初始化 (完整保留原逻辑，处理特殊Token)
     # =========================================================
@@ -283,7 +287,60 @@ def train():
         vision_tower.eval()
         rank0_print("❄️ [Confirmed] 视觉塔保持冻结状态。")
 
-    model.config.use_cache = False # 在 train 脚本里强制执行
+
+
+    # --- [黄老师 V365 协议：物理穿透解冻补丁] ---
+    rank0_print("🔥 正在执行物理穿透解冻，无视 ZeRO-3 劫持...")
+
+    # 1. 物理全开：直接作用于底层 C++ 对象，穿透所有包装
+    model.requires_grad_(True) 
+
+    # 2. 针对性加固：确保每一个核心组件都在“作战状态”
+    # 强制开启 LLM 主干
+    if hasattr(model, "model"):
+        model.model.requires_grad_(True)
+        # 针对 24 层 Transformer 每一层强制刷一遍
+        if hasattr(model.model, "layers"):
+            for layer in model.model.layers:
+                layer.requires_grad_(True)
+
+    # 3. 强制视觉塔和投影层 (双塔结构)
+    if hasattr(model, "get_model"):
+        model.get_model().requires_grad_(True)
+        vt = model.get_model().get_vision_tower()
+        if vt is not None:
+            vt.requires_grad_(True)
+            vt.train()
+
+    # 4. 强制物理配置
+    model.config.use_cache = False
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+
+    # 5. 重新审计：使用更底层的统计方式
+    # 在 8 卡环境下，我们必须让每张卡报出自己领到的“差事”
+    my_rank_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    # 强制同步一次，确保审计准确
+    if torch.distributed.is_initialized():
+        world_size = torch.distributed.get_world_size()
+        # 这是一个估算，因为词表是不分片的，Backbone 是分片的
+        # 2.06亿(词表) + (12亿 / 8) = 约 3.5 亿
+        rank0_print(f"📊 Rank {training_args.local_rank} 汇报：我这卡上负责的训练参数量: {my_rank_trainable / 1e8:.4f} 亿")
+    
+    # 终极标志：如果这个数还是 2.06，说明 model.requires_grad_(True) 被更深层的框架代码锁死了
+    if my_rank_trainable / 1e8 < 2.5:
+        rank0_print("🚨 警报：物理穿透失败！正在尝试最后的暴力手段...")
+        for name, param in model.named_parameters():
+            param.requires_grad = True # 最后的倔强
+    # 强制禁用 cache
+    model.config.use_cache = False
+    # --- [解冻逻辑结束] ---
+
+
+    
+
+
 
     if training_args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
@@ -367,6 +424,9 @@ def train():
                     save_v365_artifacts(model, output_path, args)
                 else:
                     rank0_print("⚠️ [V365 Warning] 无法在回调中找到 model 实例，跳过审计保存。")
+
+
+
         # =========================================================
     # 13. Trainer 初始化
     # =========================================================
@@ -378,6 +438,34 @@ def train():
         **data_module
     )
 
+    # --- [紧接着在后面插入这段逻辑] ---
+    if not model_args.freeze_backbone:
+        rank0_print("🚨 [物理强制] 检测到模型已由 Trainer 接管，正在执行‘二重穿透’解冻...")
+        
+        # 1. 穿透封装层
+        # 在分布式环境下，真正的模型可能在 .module 或 .model_wrapped 里
+        actual_model = trainer.model_wrapped if hasattr(trainer, "model_wrapped") else trainer.model
+        
+        # 2. 暴力递归全开：这一步会强制刷一遍 DeepSpeed 内部的参数标志位
+        actual_model.requires_grad_(True)
+        
+        # 3. 针对 DeepSpeed 引擎的内核进行梯度补丁
+        if hasattr(trainer, "accelerator") and hasattr(trainer.accelerator, "deepspeed_engine"):
+            rank0_print("💉 正在向 DeepSpeed Engine 注入梯度强制补丁...")
+            # 强制遍历引擎内部的参数集
+            for param in trainer.accelerator.deepspeed_engine.module.parameters():
+                param.requires_grad = True
+
+        # 4. 重新执行最终审计
+        final_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        rank0_print(f"============================================================")
+        rank0_print(f"📊 [二重穿透后审计] 单卡接管训练参数量: {final_trainable / 1e8:.4f} 亿")
+        
+        if final_trainable / 1e8 > 3.0:
+            rank0_print("💎 [SUCCESS] 数字跳变成功！15亿大军已全线就位。")
+        else:
+            rank0_print("⚠️ [STILL LOCKED] 数字未变。请检查 ds_config.json 是否开启了 static_network: true")
+        rank0_print(f"============================================================")
     # 参数状态检查日志
     if training_args.local_rank == 0 or training_args.local_rank == -1:
         rank0_print("\n" + "="*60)

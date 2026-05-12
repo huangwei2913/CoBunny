@@ -239,6 +239,96 @@ class SimpleMlp(nn.Module):
             x2 = x2.unsqueeze(0)
             return x2
 
+import torch
+import torch.nn as nn
+import re
+
+
+import torch
+import torch.nn as nn
+
+class CoBunnyStructuredProjector(nn.Module):
+    """
+    专为 365 Token 异构序列设计的解耦投影层（高保真版）。
+    移除所有 Dropout，确保视觉信号 100% 传导，解决 1B 模型在预训练初期的梯度静默问题。
+    """
+    def __init__(self, config):
+        super().__init__()
+        mm_dim = config.mm_hidden_size      # 视觉特征维度，如 1024
+        llm_dim = config.hidden_size        # LLM 维度，如 Llama3-1B 的 2048
+
+        # ==========================================
+        # 1. 语义流 (Semantic Stream) -> 针对 Token 0-3
+        # 职责：承载核心语义。移除 Dropout，让模型死记硬背建立初步对齐。
+        # ==========================================
+        self.semantic_proj = nn.Sequential(
+            nn.Linear(mm_dim, llm_dim),
+            nn.LayerNorm(llm_dim),
+            nn.GELU(),
+            # nn.Dropout(0.1),  <-- 已移除，确保信号无损
+            nn.Linear(llm_dim, llm_dim)
+        )
+
+        # ==========================================
+        # 2. 空间/元数据流 (Meta Stream) -> 针对 Token 4-9
+        # 职责：绝对物理坐标，必须保持高度稳定。
+        # ==========================================
+        self.meta_proj = nn.Sequential(
+            nn.Linear(mm_dim, llm_dim),
+            nn.LayerNorm(llm_dim),
+            nn.GELU(),
+            nn.Linear(llm_dim, llm_dim)
+        )
+
+        # ==========================================
+        # 3. 细节结构流 (Detail Stream) -> 针对 Token 10-363
+        # 职责：OCR 笔画和边缘，利用 Bottleneck 进行特征提纯。
+        # ==========================================
+        bottleneck_dim = llm_dim // 2
+        self.detail_proj = nn.Sequential(
+            nn.Linear(mm_dim, bottleneck_dim),
+            nn.LayerNorm(bottleneck_dim),
+            nn.GELU(),
+            nn.Linear(bottleneck_dim, llm_dim)
+        )
+
+        # ==========================================
+        # 4. 汇总流 (Super Stream) -> 针对 Token 364
+        # 职责：全局总结。移除 Dropout，强迫模型关注该总结位。
+        # ==========================================
+        self.super_proj = nn.Sequential(
+            nn.Linear(mm_dim, llm_dim),
+            nn.LayerNorm(llm_dim),
+            nn.GELU(),
+            # nn.Dropout(0.1),  <-- 已移除
+            nn.Linear(llm_dim, llm_dim)
+        )
+
+        # 最终归一化，保持各分支合并后的分布稳定性
+        self.final_norm = nn.LayerNorm(llm_dim)
+
+    def forward(self, x):
+        # x shape: [B, 365, mm_dim]
+        
+        # 1. 物理切分
+        cls_tokens   = x[:, 0:4, :]      # [B, 4, mm_dim]
+        view_anchors = x[:, 4:10, :]     # [B, 6, mm_dim]
+        patches      = x[:, 10:364, :]   # [B, 354, mm_dim]
+        super_anchor = x[:, 364:365, :]  # [B, 1, mm_dim]
+
+        # 2. 独立映射 (Disentanglement)
+        out_cls     = self.semantic_proj(cls_tokens)
+        out_view    = self.meta_proj(view_anchors)
+        out_patches = self.detail_proj(patches)
+        out_super   = self.super_proj(super_anchor)
+
+        # 3. 完美重组
+        out_fused = torch.cat([out_cls, out_view, out_patches, out_super], dim=1) 
+
+        # 4. 统一分布输出
+        return self.final_norm(out_fused)
+
+
 
 #也就说我们可以在这里强制让视觉编码器，直接输出IdentityMap，特征向量
 def build_vision_projector(config, **kwargs):
@@ -250,6 +340,9 @@ def build_vision_projector(config, **kwargs):
      # 这里的hidden_size对应的是LLM Decoder期望的特征维度。每个token的特征维度都是一样的，例如llmaconfig是4096
     elif projector_type == 'simple_mlp_twoview':
         return SimpleMlp(config.mm_hidden_size, config.hidden_size, twoview=True)       #使用这个投影
+
+    elif projector_type == 'cobunny_structured':
+        return CoBunnyStructuredProjector(config)
 
     elif projector_type.startswith('mlp'):
         mlp_gelu_match = re.match(r'^mlp(\d+)x_gelu$', projector_type)

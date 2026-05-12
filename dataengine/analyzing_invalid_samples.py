@@ -2,7 +2,12 @@ import json
 import re
 
 # 指向你当前报错的数据集路径
-data_path = "/mnt/CoBunny/dataassert/v365_stage3_mcp_final_clean_fixed.json"
+#data_path = "/mnt/CoBunny/dataassert/v365_stage3_mcp_final_clean_fixed.json"
+data_path = "/mnt/conda_data/Bunny-v1.1-data/pretrain/PRIMA_pretrain_merged_en_only.json"
+data_path = "/mnt/CoBunny/dataassert/stage1_pretrain_final_pure_100pct.json"
+#data_path = "/mnt/CoBunny/dataassert/test_sample_4000.json"
+
+
 
 def analyze_mismatch():
     with open(data_path, 'r', encoding='utf-8') as f:
@@ -47,6 +52,9 @@ def analyze_mismatch():
             print(f"   - 实际提供图片数量: {actual_image_count}")
             print(f"   - 预览内容: {sample_info['text_snippet']}")
             print("-" * 30)
+
+
+
 
     print(f"\n✅ 扫描结束！共发现 {len(mismatch_samples)} 个不匹配样本。")
     return mismatch_samples

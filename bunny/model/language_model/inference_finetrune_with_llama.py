@@ -14,6 +14,7 @@ if BUNNY_REPO_PATH not in sys.path:
     sys.path.insert(0, BUNNY_REPO_PATH)
 
 MODEL_PATH = '/mnt/CoBunny/checkpoints-stage3/llama'
+MODEL_PATH = '/mnt/CoBunny/checkpoints-stage3/llama_ocr'
 IMAGE_PATH = "/mnt/CoBunny/bunny/model/language_model/testt.jpg"
 DEVICE = "cuda:0" 
 IMAGE_TOKEN_INDEX = -200 
@@ -169,7 +170,9 @@ def run_inference():
         # 兼容单塔或双塔，保证最终是 1 开头的 Batch 维度
         image_tensor = image_tensor.unsqueeze(0) if image_tensor.shape[0] != 1 else image_tensor
     
-    prompt = get_inference_prompt("What is in the image?please describe it clearly.")
+    prompt = get_inference_prompt("What is in the image? Please describe it clearly.")
+    #prompt = get_inference_prompt("Can you read the text in the image?")
+
     input_ids = tokenizer_image_token_custom(prompt, tokenizer)
 
     print(f"🧠 [3/4] 模型开始生成 ↓")

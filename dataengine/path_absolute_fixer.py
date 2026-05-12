@@ -6,6 +6,14 @@ from tqdm import tqdm
 JSON_PATH = "/mnt/CoBunny/dataassert/v365_stage3_mcp_final.json"
 OUTPUT_PATH = "/mnt/CoBunny/dataassert/v365_stage3_mcp_final_abs.json"
 
+
+JSON_PATH = "/mnt/CoBunny/dataassert/echo4o_hard_vqa_refined.json"
+OUTPUT_PATH = "/mnt/CoBunny/dataassert/echo4o_hard_vqa_refined_abspath.json"
+
+JSON_PATH = "/mnt/CoBunny/dataassert/blip3o_final_sft.json"
+OUTPUT_PATH = "/mnt/CoBunny/dataassert/blip3o_final_sft_abs.json"
+
+
 # 扫描这两个大根目录下的所有子文件夹
 SEARCH_ROOTS = [
     "/data",

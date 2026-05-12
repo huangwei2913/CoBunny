@@ -45,7 +45,7 @@ def train():
         cache_dir=training_args.cache_dir,
         model_max_length=training_args.model_max_length,
         padding_side="right",
-        use_fast=True,
+        use_fast=False,
     )
 
 
@@ -71,37 +71,40 @@ def train():
 
     model.config.unfreeze_mm_vision_tower = model_args.unfreeze_mm_vision_tower
     model.config.training_stage = "pretrain"  # 确保传给 config
-    NEW_TOKENS = ["<img_content>", "<pad>"]
-    tokenizer.add_tokens(NEW_TOKENS, special_tokens=True)
+
+    tokenizer.pad_token = tokenizer.eos_token
+    NEW_TOKENS = ["<img_content>"]
+    num_new_tokens = tokenizer.add_tokens(NEW_TOKENS, special_tokens=True)
     model.resize_token_embeddings(len(tokenizer))
     img_content_id = tokenizer.convert_tokens_to_ids("<img_content>")
-    pad_id = tokenizer.convert_tokens_to_ids("<pad>")
-    # 设置 Pad 属性
-    tokenizer.pad_token = "<pad>"
-    model.config.pad_token_id = tokenizer.pad_token_id  # 这个在后面会被用到
-    model.config.image_token_index = tokenizer.convert_tokens_to_ids("<img_content>")
-    eos_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 128001
-    # 3. 强制覆盖权重（灵魂搬家）
-    # 不管是不是第一次加，我们都执行一次覆盖，确保 50295 等于 50256 的记忆
-   
-    rank0_print(f"✅ 权重搬家与词表强制对齐完成。当前词表大小: {len(tokenizer)}")
-    pad_id_in_tokenizer = tokenizer.pad_token_id
-    pad_id_by_name = tokenizer.convert_tokens_to_ids("<pad>")
+    model.config.pad_token_id = tokenizer.pad_token_id # 此时它就是 128001
+    model.config.image_token_index = img_content_id
+    model.config.vocab_size = len(tokenizer)
+    rank0_print("🔥 正在执行权重搬家：仅为视觉占位符分配初始语义...")
+    with torch.no_grad():
+        input_embeddings = model.get_input_embeddings().weight
+        output_embeddings = model.get_output_embeddings().weight 
+        ref_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 128001
+        # 只拷贝 img_content 的权重，绝对不要对 PAD 进行克隆
+        input_embeddings[img_content_id] = input_embeddings[ref_id].clone()
+        output_embeddings[img_content_id] = output_embeddings[ref_id].clone()
 
-    rank0_print(f"🔍 [Tokenizer Check]")
-    rank0_print(f"   - <pad> token ID: {pad_id_by_name}")
-    rank0_print(f"   - tokenizer.pad_token_id: {pad_id_in_tokenizer}")
-
-    if pad_id_in_tokenizer != pad_id_by_name:
-        raise ValueError("🚨 严重错误：tokenizer.pad_token_id 与 <pad> 的实际 ID 不一致！")
-
-    rank0_print(f"   - <img_content> ID: {model.config.image_token_index}")
-
+    
     # 1. 【强行注入】把 model_args 的意志强加给 model.config
     # 这样即使内部代码错误地使用了 config，它也能读到 True
+    # 在你 resize 完 model 之后，准备开始训练前，加上这两行打印：
+    rank0_print(f"🔍 [分词器配准检查] PAD ID: {tokenizer.pad_token_id}")
+    rank0_print(f"🔍 [分词器配准检查] EOS ID: {tokenizer.eos_token_id}")
+
+    if tokenizer.pad_token_id != tokenizer.eos_token_id:
+        rank0_print("⚠️ [警报] PAD 和 EOS 不一致，这将导致复读或停止符失效！")
+        # 强制修正
+        tokenizer.pad_token = tokenizer.eos_token
+        model.config.pad_token_id = tokenizer.pad_token_id
+
+    data_args.image_token_index = img_content_id
     print(f"💉 [Patch] 正在将 unfreeze_mm_vision_tower={model_args.unfreeze_mm_vision_tower} 注入到 model.config...")
     model.config.unfreeze_mm_vision_tower = model_args.unfreeze_mm_vision_tower
-    
     # 2. 【初始化】正常调用
     rank0_print("👁️ 初始化视觉模块...")
     model.get_model().initialize_vision_modules(model_args=model_args)
@@ -280,7 +283,9 @@ def train():
     # =========================================================
     if training_args.local_rank <= 0:
         rank0_print("📢 [Stage 3] 训练结束，开始执行全量保存...")
-
+        model.config.image_token_index = tokenizer.convert_tokens_to_ids("<img_content>")
+        model.config.pad_token_id = tokenizer.pad_token_id
+        model.config.vocab_size = len(tokenizer)
         # 如果用了 LoRA，必须合并
         if training_args.lora_enable:
             rank0_print("📎 Merging LoRA weights back to base model...")

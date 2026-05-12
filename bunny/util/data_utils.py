@@ -29,35 +29,46 @@ class DataArguments:
     mm_vision_tokens: int = field(default=365)  # 明确告诉数据加载器，视觉塔输出多少个tokens
 
 #除了返回被替换成的<img_content>之外，我们还要每一个样本中的影像数量
+import re
+from bunny.constants import DEFAULT_IMAGE_TOKEN
+
 def preprocess_multimodal(sources, data_args):
     is_multimodal = data_args.is_multimodal
+    # 原始数据里的旧标签
     RAW_JSON_TAG = "<image>"
+    # 您定义的 DEFAULT_IMAGE_TOKEN (通常是 "<img_content>")
 
     for source in sources:
-        # --- 重点 1: 无论如何，先给这个样本打个“零图”底色 ---
-        # 这样后面不管是纯文本，还是没匹配上，都不会报 KeyError
+        # --- 重点 1: 初始化影像计数 ---
         source[0]['num_images'] = 0 
 
         if not is_multimodal:
             continue
 
+        # --- 重点 2: 彻底清洗并标准化第一轮对话 ---
+        sentence_one = source[0]['value']
+        
+        # 使用正则：匹配 <image> 或者 <img_content>，以及它们后面跟着的任意空白符(\s*)
+        # 这样不管样本里写的是 "<image> You" 还是 "<image>\n\n" 还是 "<img_content>  "
+        # 统统都会被替换成干净的文本内容
+        pattern = r'(' + re.escape(RAW_JSON_TAG) + r'|' + re.escape(DEFAULT_IMAGE_TOKEN) + r')\s*'
+        
+        # 执行清洗
+        clean_content = re.sub(pattern, '', sentence_one).strip()
+        
+        # 重新强制注入：标准占位符 + 换行 + 干净的文本
+        # 确保每个进入训练的样本，开头一定是唯一的 "<img_content>\n"
+        source[0]['value'] = DEFAULT_IMAGE_TOKEN + '\n' + clean_content
+
+        # --- 重点 3: 统计最终的图片数量 ---
+        # 扫描整个对话列表，确保 num_images 正确
+        total_images = 0
         for sentence in source:
-            if RAW_JSON_TAG in sentence['value']:
-                num_images = sentence['value'].count(RAW_JSON_TAG)
+            total_images += sentence['value'].count(DEFAULT_IMAGE_TOKEN)
+        
+        # 即使清洗后没统计到（虽然上面强制加了，但为了保险），也确保逻辑闭环
+        source[0]['num_images'] = total_images
                 
-                # --- 重点 2: 执行你的替换逻辑 ---
-                if num_images == 1:
-                    sentence['value'] = sentence['value'].replace(RAW_JSON_TAG, DEFAULT_IMAGE_TOKEN).strip()
-                elif num_images > 1:
-                    parts = sentence['value'].split(RAW_JSON_TAG)
-                    new_val = ""
-                    for i in range(num_images):
-                        new_val += f"{parts[i]}Image {i+1}: {DEFAULT_IMAGE_TOKEN} "
-                    sentence['value'] = (new_val + parts[-1]).strip()
-                
-                # --- 重点 3: 只有真正匹配到图片了，才更新这个数字 ---
-                source[0]['num_images'] = num_images
-    
     return sources
 #用分词器得到每一个样本中的字符串对应的的input_ids和lables
 #每一个样本的
@@ -307,14 +318,19 @@ class LazySupervisedDataset(Dataset):
                             full_path = img_path
                         else:
                             full_path = os.path.join(self.data_args.image_folder, img_path)
-                      
-                        # 只读 Header，极快
-                        with Image.open(full_path) as img:
-                            w, h = img.size
-                            # 🚨 过滤条件：总像素 > 8000万 或 比例超过 15:1 (防止 OOM 和 畸变)
-                            if (w * h) > 80000000 or (w / h) > 15 or (h / w) > 15:
-                                image_invalid = True
-                                break
+                        if os.path.isfile(full_path):
+                            with Image.open(full_path) as img:
+                                w, h = img.size
+                                # 🚨 过滤条件：总像素 > 8000万 或 比例超过 15:1
+                                if (w * h) > 80000000 or (w / h) > 15 or (h / w) > 15:
+                                    image_invalid = True
+                                    break
+                        else:
+                            # 找不到文件的情况，标记为无效，并打印路径
+                            rank0_print(f"🚨 [文件缺失] 找不到图片文件: {full_path}")
+                            image_invalid = True
+                            break
+
                     except Exception:
                         rank0_print(f"🚨 [文件损坏] 无法读取图片: {full_path}, 错误原因: {e}")
                         image_invalid = True
@@ -374,6 +390,25 @@ class LazySupervisedDataset(Dataset):
 
         # 这里 preprocess 吐出来的 data_dict 包含了 input_ids 和 labels
         data_dict = preprocess(sources, self.tokenizer, has_image=has_image)
+
+
+        if has_image:
+            # 这里的 IMAGE_TOKEN_INDEX 对应 Bunny 里的 -200 (或者您定义的常量)
+            # 我们检查 input_ids 里到底被塞进了几个图像 token
+            from bunny.constants import IMAGE_TOKEN_INDEX
+            
+            input_ids_tensor = data_dict['input_ids']
+            actual_token_count = (input_ids_tensor == IMAGE_TOKEN_INDEX).sum().item()
+
+            if actual_token_count != 1:
+                rank0_print(f"\n🚨 [!!!数据污染预警!!!] ID: {raw_entry.get('id', 'N/A')}")
+                rank0_print(f"   - 预期占位符: 1, 实际 Tokenize 后数量: {actual_token_count}")
+                # 解码看看文本变成了什么鬼样子
+                debug_text = self.tokenizer.decode(input_ids_tensor.clamp(min=0)) 
+                rank0_print(f"   - 最终 Prompt 内容: {debug_text[:500]}...") 
+                rank0_print("-" * 50)
+        # =======================================
+
 
         # =================================================================
         # 🛡️ 核心质检逻辑：拦截“截断自杀”样本
@@ -488,7 +523,6 @@ class DataCollatorForSupervisedDataset(object):
                 batch['images'] = torch.stack(images)
             else:
                 batch['images'] = images
-
         # =================================================================
         # 🔍 深度调试区 (修复了 RuntimeError 问题)
         # =================================================================

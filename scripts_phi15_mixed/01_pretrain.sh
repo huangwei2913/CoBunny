@@ -18,10 +18,11 @@ INCLUDE_STR="192.168.0.3:0,1,2,3,4,5,6,7"
 # 2. 模型与架构参数
 # ========================================================
 MODEL_TYPE="phi-1.5"
-BASE_MODEL="/mnt/conda_data/microsoft/phi-1_5"
+BASE_MODEL="/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_ocr_deepseek_inspired/checkpoint-4000"
 # 关键：这里传你代码中定义的逻辑开关名称
 VISION_TOWER="mixedencoder" 
-OUTPUT_DIR="/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_modified"
+OUTPUT_DIR="/mnt/conda_data/checkpoints-pretrain/pretrain_stage1_ocr_hard"
+IMAGE_PATH="/"
 mkdir -p $OUTPUT_DIR
 # 1. 基础环境
 export PYTHONUNBUFFERED=1
@@ -64,8 +65,8 @@ deepspeed \
     --vision_tower $VISION_TOWER \
     --vision_tower_dino /mnt/facebook/dinov3-convnext-large-pretrain-lvd1689m \
     --vision_tower_siglip /mnt/siglip-so400m-patch14-384 \
-    --data_path /mnt/conda_data/Bunny-v1.1-data/pretrain/bunny_stage1_cleaned.json \
-    --image_folder /mnt/conda_data/Bunny-v1.1-data/pretrain/images \
+    --data_path  /mnt/CoBunny/dataassert/mixed_stage1_2m_stable.json \
+    --image_folder $IMAGE_PATH \
     --mm_projector_type mlp2x_gelu \
     --tune_mm_mlp_adapter True \
     --freeze_backbone True \
@@ -77,13 +78,13 @@ deepspeed \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 4 \
     --eval_strategy "steps" \
-    --eval_steps 2000 \
+    --eval_steps 1000 \
     --save_strategy "steps" \
-    --save_steps 2000 \
-    --save_total_limit 10 \
+    --save_steps 1000 \
+    --save_total_limit 2 \
     --load_best_model_at_end True \
-    --learning_rate 2e-4 \
-    --max_grad_norm 0.5 \
+    --learning_rate 1e-4 \
+    --max_grad_norm 1.0 \
     --lr_scheduler_type  "cosine"\
     --logging_steps 10 \
     --warmup_ratio 0.1  \
@@ -92,6 +93,6 @@ deepspeed \
     --greater_is_better False \
     --model_max_length 2048 \
     --gradient_checkpointing True \
-    --group_by_modality_length True \
+    --group_by_modality_length False \
     --dataloader_num_workers 16 \
     --report_to none 2>&1 | tee $OUTPUT_DIR/pretrain.log
